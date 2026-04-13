@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.2"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "santecpro"
+version = "1.0.0"
+description = "Cross-platform Python driver for Santec TSL-550 laser and MPM-210 power meter"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "pyvisa>=1.14",
+    "numpy>=2.0",
+    "matplotlib>=3.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
