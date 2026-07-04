@@ -26,6 +26,8 @@ pip install -r requirements.txt
 `requirements.txt` = `flask · pyvisa · numpy · pythonnet`。
 （诊断脚本若要画图,可另装 `matplotlib`。）
 
+> **一步到位 + 自检(推荐)**:`python check_setup.py --install` 会先装依赖,再逐项检查 Python 版本、依赖、DLL、pythonnet 加载、VISA/GPIB,并打印 `✅ 就绪 / ❌ 缺什么`。只想检查不安装就去掉 `--install`。
+
 ## 3. DLL(已随仓库提供,无需手动放入)
 
 所需的 Santec/NI/Keysight DLL 已包含在 `vendor/santec_dll/`(即 `loader.py` 默认读取路径),**无需再手动获取**。详见 [vendor/README.md](vendor/README.md)。
@@ -47,6 +49,8 @@ pip install -r requirements.txt
 > GPIB 地址用 NI MAX 查看后填对即可。
 
 ## 5. 启动
+
+启动前建议先跑 `python check_setup.py` 确认环境就绪(见 §2)。
 
 ```bat
 python server.py
