@@ -20,6 +20,7 @@ Python-IL-STS/
 # Generated scan output / test data
 scan_results/
 test_11_points.csv
+windows-server/scan_jobs/
 
 # Proprietary vendor binaries — not redistributable; obtain from vendor installers
-windows_server/vendor/santec_dll/
+windows-server/vendor/santec_dll/

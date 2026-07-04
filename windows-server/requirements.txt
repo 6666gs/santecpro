@@ -1,0 +1,4 @@
+flask>=3.0
+pyvisa>=1.14
+numpy>=2.0
+pythonnet>=3.0

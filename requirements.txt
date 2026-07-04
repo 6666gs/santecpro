@@ -1,4 +1,0 @@
-pyvisa>=1.14
-numpy>=2.0
-matplotlib>=3.9
-PyQt5>=5.15
