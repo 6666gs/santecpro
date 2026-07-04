@@ -31,6 +31,8 @@ python check_setup.py --install   # 装依赖 + 自检依赖并 ping Windows 服
 python run_ui.py                  # 界面里服务器 URL 指向 http://<Windows_IP>:5000
 ```
 
+> 批量任务:用 `.scan` 脚本一次描述多段扫描(宽谱 / 固定范围 / 双向红↔蓝),`python run_job.py my_job.scan` 自动逐段扫并存数据。语法见 [remote-client/README.md §4](remote-client/README.md)。
+
 ## 文档
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 架构总览与数据流

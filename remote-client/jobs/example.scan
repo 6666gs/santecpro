@@ -1,0 +1,17 @@
+# 示例扫谱任务:宽谱 + 谐振双向 + 固定范围反向
+# 用法:python run_job.py jobs/example.scan --dry-run   (先看计划)
+#      python run_job.py jobs/example.scan             (真跑)
+
+job example_device
+
+# 全局默认(每段可覆盖)
+set power=0 channels=1 range=1 averaging=0.01
+
+# 1) 宽谱概览:1500 -> 1600 nm,20 pm,50 nm/s
+scan broadband 1500 1600 step=20pm speed=50
+
+# 2) 谐振精扫:1549 -> 1551 nm,1 pm,10 nm/s,双向(先蓝->红,再红->蓝)
+scan resonance 1549 1551 step=1pm speed=10 dir=both
+
+# 3) C 波段反向、双通道:1530 -> 1565 nm,5 pm,20 nm/s
+scan band_c 1530 1565 step=5pm speed=20 dir=reverse channels=1,2
