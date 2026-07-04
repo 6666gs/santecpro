@@ -22,5 +22,8 @@ scan_results/
 test_11_points.csv
 windows-server/scan_jobs/
 
+# Runtime logs
+*.log
+
 # Proprietary vendor binaries — not redistributable; obtain from vendor installers
 windows-server/vendor/santec_dll/
