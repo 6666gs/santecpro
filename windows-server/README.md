@@ -26,20 +26,11 @@ pip install -r requirements.txt
 `requirements.txt` = `flask · pyvisa · numpy · pythonnet`。
 （诊断脚本若要画图,可另装 `matplotlib`。）
 
-## 3. 放入 DLL(必需,仓库不分发)
+## 3. DLL(已随仓库提供,无需手动放入)
 
-从各厂商安装程序取得下列文件,放进 `vendor/santec_dll/`(详见 [vendor/README.md](vendor/README.md)):
+所需的 Santec/NI/Keysight DLL 已包含在 `vendor/santec_dll/`(即 `loader.py` 默认读取路径),**无需再手动获取**。详见 [vendor/README.md](vendor/README.md)。
 
-```
-vendor/santec_dll/
-├── STSProcess.dll            ← 必需 (Santec IL-STS SDK)
-├── Santec.Instrument.dll     ← 必需 (Santec 仪器 SDK)
-├── NationalInstruments.*.dll (NI-VISA / DAQmx 运行时)
-├── Ivi.Visa.dll / Keysight.Visa.dll
-└── FTD2XX_NET.dll
-```
-
-缺文件启动时会报 `FileNotFoundError: Missing Santec DLLs`。
+> ⚠️ 这些是专有二进制,仅因本仓库为 **私有** 才随附;请勿将仓库改为公开或外传 DLL。
 
 ## 4. 配置
 

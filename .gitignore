@@ -13,10 +13,6 @@ build/
 .claude/
 .idea/
 
-# Vendored third-party reference repos (have their own git history)
-PySantec/
-Python-IL-STS/
-
 # Generated scan output / test data
 scan_results/
 test_11_points.csv
@@ -24,6 +20,3 @@ windows-server/scan_jobs/
 
 # Runtime logs
 *.log
-
-# Proprietary vendor binaries — not redistributable; obtain from vendor installers
-windows-server/vendor/santec_dll/

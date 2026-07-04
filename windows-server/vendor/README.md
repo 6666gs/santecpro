@@ -1,23 +1,24 @@
 # Vendor DLLs
 
-The Windows backend depends on proprietary DLLs that are **not** redistributed in
-this repository for licensing reasons:
+The Windows backend depends on proprietary Santec/NI/Keysight DLLs, loaded from
+`vendor/santec_dll/`:
 
 ```
 vendor/santec_dll/
-├── STSProcess.dll
-├── Santec.Instrument.dll
-├── FTD2XX_NET.dll
+├── STSProcess.dll            (Santec IL-STS SDK)
+├── Santec.Instrument.dll     (Santec instrument SDK)
+├── FTD2XX_NET.dll            (FTDI D2XX)
 ├── Ivi.Visa.dll
-├── Keysight.Visa.dll
-└── NationalInstruments.*.dll
+├── Keysight.Visa.dll         (Keysight IO Libraries)
+└── NationalInstruments.*.dll (NI-VISA / NI-DAQmx runtime)
 ```
 
-Obtain these from the corresponding vendor installers on the Windows measurement PC:
+**These DLLs are bundled in this repository** (in `santec_dll/`) so the server is
+install-and-run — no manual sourcing needed. `loader.py` reads them from this
+directory by default.
 
-- **STSProcess.dll / Santec.Instrument.dll** — Santec IL-STS / instrument SDK
-- **NationalInstruments.\*.dll** — NI-VISA / NI-DAQmx runtime
-- **Keysight.Visa.dll / Ivi.Visa.dll** — Keysight IO Libraries Suite
-- **FTD2XX_NET.dll** — FTDI D2XX drivers
-
-Place them under `vendor/santec_dll/` before running the Windows server.
+> ⚠️ **Proprietary — do not redistribute publicly.** They are the property of
+> Santec, National Instruments, and Keysight and are included here only because
+> this repository is **private**. Do not make this repository public or copy the
+> DLLs into any public location. To re-source them, they ship with the vendor
+> installers on the measurement PC (Santec IL-STS SDK, NI-VISA/DAQmx, Keysight IO).

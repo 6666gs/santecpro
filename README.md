@@ -17,11 +17,10 @@ Santec **TSL-550** 可调激光器 + **MPM-210** 功率计的扫谱系统。底�
 
 ## 快速上手
 
-**Windows 端**
+**Windows 端**(DLL 已随仓库提供,无需手动获取)
 ```bat
 cd windows-server
-pip install -r requirements.txt && pip install pythonnet
-:: 放好 vendor/santec_dll/*.dll 后:
+pip install -r requirements.txt
 python server.py
 ```
 

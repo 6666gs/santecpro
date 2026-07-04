@@ -22,7 +22,7 @@
 │  santecpro/remote.py ─ RemoteScanner│  HTTP  │  santec_dll_backend/  ◀ 真正扫描 (pythonnet)│
 │  santecpro/results.py ─ IL/合并      │ ─────▶ │  stsprocess_api.py   请求 ↔ DLL 适配         │
 │  exporter/plotter ─ CSV/画图         │ :5000  │  santecpro/          SCPI 备用驱动子集        │
-│  config.py ─ SERVER_URL 等          │        │  vendor/santec_dll/  *.dll(需手动放入)       │
+│  config.py ─ SERVER_URL 等          │        │  vendor/santec_dll/  *.dll(已随仓库提供)      │
 │  server_control / remote_sts_scan ──│  SSH   │  config.py           HOST/PORT/GPIB 地址     │
 │                                     │ ─────▶ │  diagnostics/        诊断脚本                 │
 └───────────────────────────────────┘        └────────────────────┬───────────────────────┘
