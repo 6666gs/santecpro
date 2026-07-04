@@ -27,8 +27,8 @@ python server.py
 **控制端**
 ```bash
 cd remote-client
-pip install -r requirements.txt
-python run_ui.py          # 界面里服务器 URL 指向 http://<Windows_IP>:5000
+python check_setup.py --install   # 装依赖 + 自检依赖并 ping Windows 服务
+python run_ui.py                  # 界面里服务器 URL 指向 http://<Windows_IP>:5000
 ```
 
 ## 文档

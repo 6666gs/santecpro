@@ -15,6 +15,8 @@ pip install -r requirements.txt
 
 `requirements.txt` = `requests · numpy · matplotlib · PyQt5`(无需 pyvisa、无需 DLL)。
 
+> **一步到位 + 自检(推荐)**:`python check_setup.py --install` 会先装依赖,再检查 Python/依赖,并 ping `SERVER_URL/api/status` 确认能连上 Windows 服务,打印 `✅ 就绪 / ❌ 缺什么`。测别的地址用 `--url http://IP:5000`。
+
 ## 2. 配置
 
 改 [`config.py`](config.py) 或设环境变量(环境变量优先):
