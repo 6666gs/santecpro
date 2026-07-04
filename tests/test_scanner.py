@@ -6,8 +6,8 @@ import numpy as np
 import pytest
 from unittest.mock import MagicMock, patch, call
 
-from santecpro.instruments.tsl import TSLInstrument
-from santecpro.instruments.mpm import MPMInstrument, MPM_RANGES
+from santecpro.instruments.tsl import TSLInstrument, SWEEP_MODE_CONT_ONE_WAY, TRIG_OUT_STEP
+from santecpro.instruments.mpm import MPMInstrument, MPM_RANGES, MEAS_MODE_SWEEP1
 from santecpro.scanner import (
     ScanResult,
     ILMeasurement,
@@ -51,9 +51,33 @@ def _make_mock_tsl():
     tsl = MagicMock(spec=TSLInstrument)
     tsl.is_connected = True
     tsl.idn = "SANTEC,TSL-550,12345,1.00"
-    tsl.get_sweep_status.return_value = "STANDING_BY_TRIGGER"
+    sweep_state = {
+        "mode": SWEEP_MODE_CONT_ONE_WAY,
+        "start": 1500.0,
+        "stop": 1500.04,
+        "step": 0.01,
+        "speed": 50.0,
+    }
+
+    def set_sweep_mode(mode):
+        sweep_state["mode"] = mode
+
+    def configure_sweep(start_wl, stop_wl, step, speed):
+        sweep_state.update(
+            {"start": start_wl, "stop": stop_wl, "step": step, "speed": speed}
+        )
+
+    tsl.get_sweep_status.return_value = "3"
     tsl.get_logging_data_points.return_value = 5
+    tsl.get_trigger_step_width.return_value = 0.01
     tsl.get_power_monitor_data.return_value = [7.5, 7.6, 7.7, 7.8, 7.9]
+    tsl.set_sweep_mode.side_effect = set_sweep_mode
+    tsl.configure_sweep.side_effect = configure_sweep
+    tsl.get_sweep_mode.side_effect = lambda: sweep_state["mode"]
+    tsl.get_sweep_start.side_effect = lambda: sweep_state["start"]
+    tsl.get_sweep_stop.side_effect = lambda: sweep_state["stop"]
+    tsl.get_sweep_step.side_effect = lambda: sweep_state["step"]
+    tsl.get_sweep_speed.side_effect = lambda: sweep_state["speed"]
     return tsl
 
 
@@ -62,8 +86,10 @@ def _make_mock_mpm():
     mpm.is_connected = True
     mpm.idn = "SANTEC,MPM-210,67890,1.16"
     mpm.get_logging_status.return_value = (1, 5)
+    mpm.get_logging_data_points.return_value = 5
     mpm.get_channel_logging_data.return_value = [-10.0, -11.0, -12.0, -13.0, -14.0]
-    mpm.get_power.return_value = -10.0
+    mpm.get_power.return_value = [-10.0, -11.0, -12.0, -13.0]
+    mpm.get_error.return_value = (0, "No error")
     return mpm
 
 
@@ -295,15 +321,17 @@ class TestScannerConfigure:
 
     def test_configure_stores_params(self):
         tsl, mpm = _make_mock_tsl(), _make_mock_mpm()
+        tsl.get_trigger_step_width.return_value = 0.01
+        mpm.get_logging_data_points.return_value = 10001
         scanner = Scanner(tsl, mpm)
 
         scanner.configure(
             start_wl=1500,
             stop_wl=1600,
             step=0.01,
-            speed=50,
+            speed=5,
             power=0,
-            sweep_mode="CONTINUOUS_ONE_WAY",
+            sweep_mode=SWEEP_MODE_CONT_ONE_WAY,
             ranges=[1, 3],
             mpm_channel=2,
             mpm_module=1,
@@ -312,33 +340,119 @@ class TestScannerConfigure:
         assert scanner._config["start_wl"] == 1500
         assert scanner._config["stop_wl"] == 1600
         assert scanner._config["step"] == 0.01
-        assert scanner._config["speed"] == 50
-        assert scanner._config["power"] == 0
+        assert scanner._config["speed"] == 5
         assert scanner._config["ranges"] == [1, 3]
         assert scanner._config["mpm_channel"] == 2
+        assert scanner._config["mpm_averaging_time_ms"] == pytest.approx(0.01)
 
     def test_configure_calls_tsl(self):
         tsl, mpm = _make_mock_tsl(), _make_mock_mpm()
+        mpm.get_logging_data_points.return_value = 5
         scanner = Scanner(tsl, mpm)
         scanner.configure(
-            start_wl=1500, stop_wl=1600, step=1, speed=50, power=-5
+            start_wl=1500, stop_wl=1500.04, step=0.01, speed=50, power=-5
         )
 
         tsl.set_power.assert_called_once_with(-5)
-        tsl.configure_sweep.assert_called_once_with(1500, 1600, 1, 50)
-        tsl.set_trigger_output.assert_called_once_with("STEP")
+        tsl.configure_sweep.assert_called_once_with(1500, 1500.04, 0.01, 50)
+        tsl.set_trigger_output.assert_called_once_with(TRIG_OUT_STEP)
+        tsl.set_trigger_step_width.assert_called_once_with(0.01)
+        tsl.get_trigger_step_width.assert_called_once()
+        tsl.set_scan_start_mode.assert_called_once_with(1)
+
+    def test_configure_raises_if_tsl_trigger_step_is_not_applied(self):
+        tsl, mpm = _make_mock_tsl(), _make_mock_mpm()
+        tsl.get_trigger_step_width.return_value = 0.04
+        scanner = Scanner(tsl, mpm)
+
+        with pytest.raises(RuntimeError, match="trigger step"):
+            scanner.configure(
+                start_wl=1550, stop_wl=1550.1, step=0.01, speed=1, power=0
+            )
+
+    def test_configure_rejects_unsupported_factory_step(self):
+        tsl, mpm = _make_mock_tsl(), _make_mock_mpm()
+        scanner = Scanner(tsl, mpm)
+
+        with pytest.raises(ValueError, match="Unsupported sweep step"):
+            scanner.configure(
+                start_wl=1540, stop_wl=1550, step=1, speed=1, power=0
+            )
+
+    def test_configure_raises_when_tsl_reports_different_speed(self):
+        tsl, mpm = _make_mock_tsl(), _make_mock_mpm()
+        tsl.get_sweep_speed.side_effect = None
+        tsl.get_sweep_speed.return_value = 10.0
+        scanner = Scanner(tsl, mpm)
+
+        with pytest.raises(RuntimeError, match="sweep speed mismatch"):
+            scanner.configure(
+                start_wl=1500, stop_wl=1500.04, step=0.01, speed=50, power=0
+            )
+
+    def test_configure_logs_mpm_error_but_does_not_block_scan_setup(self, caplog):
+        tsl, mpm = _make_mock_tsl(), _make_mock_mpm()
+        mpm.get_error.return_value = (104, "uPP Comm. Moduel Mismatched")
+        scanner = Scanner(tsl, mpm)
+
+        scanner.configure(
+            start_wl=1500, stop_wl=1500.04, step=0.01, speed=50, power=0
+        )
+
+        mpm.stop_logging.assert_called()
+        mpm.get_error.assert_called()
+        assert "MPM ERR? before configure returned 104" in caplog.text
+
+    def test_configure_raises_when_mpm_logn_does_not_match_expected_points(self):
+        tsl, mpm = _make_mock_tsl(), _make_mock_mpm()
+        mpm.get_logging_data_points.return_value = 4
+        scanner = Scanner(tsl, mpm)
+
+        with pytest.raises(RuntimeError, match="MPM LOGN mismatch"):
+            scanner.configure(
+                start_wl=1500, stop_wl=1500.04, step=0.01, speed=50, power=0
+            )
 
     def test_configure_calls_mpm(self):
         tsl, mpm = _make_mock_tsl(), _make_mock_mpm()
+        mpm.get_logging_data_points.return_value = 5
         scanner = Scanner(tsl, mpm)
         scanner.configure(
-            start_wl=1500, stop_wl=1600, step=1, speed=50, power=-5
+            start_wl=1500, stop_wl=1500.04, step=0.01, speed=50, power=-5
         )
 
-        mpm.set_unit.assert_called_once_with("dBm")
-        mpm.set_range_mode.assert_called_once_with("MANUAL")
-        # data_points = (1600-1500)/1 + 1 = 101
-        mpm.set_logging_data_points.assert_called_once_with(101)
+        mpm.set_unit.assert_called_once_with(0)  # 0 = dBm
+        mpm.set_range_mode.assert_called_once_with(0)  # 0 = Manual
+        mpm.set_measurement_mode.assert_called_once_with(MEAS_MODE_SWEEP1)
+        mpm.set_sweep_wavelength.assert_called_once_with(1500, 1500.04, 0.01)
+        mpm.set_sweep_speed.assert_called_once_with(50)
+        mpm.set_averaging_time.assert_called_once_with(0.01)
+        # SWEEP1 mode: LOGN is auto-calculated from WSET, not set manually
+        mpm.set_logging_data_points.assert_not_called()
+
+    def test_run_single_scan_raises_when_completed_count_is_short(self):
+        tsl, mpm = _make_mock_tsl(), _make_mock_mpm()
+        mpm.get_logging_status.return_value = (1, 4)
+        scanner = Scanner(tsl, mpm)
+        scanner.configure(start_wl=1500, stop_wl=1500.04, step=0.01, speed=50, power=0)
+
+        with pytest.raises(RuntimeError, match="trigger pulses were missed"):
+            scanner.run_single_scan(plot=False)
+
+        assert mpm.stop_logging.call_count >= 2
+        tsl.stop_sweep.assert_called()
+
+    def test_run_single_scan_stops_instruments_when_poll_times_out(self):
+        tsl, mpm = _make_mock_tsl(), _make_mock_mpm()
+        scanner = Scanner(tsl, mpm)
+        scanner.configure(start_wl=1500, stop_wl=1500.04, step=0.01, speed=50, power=0)
+
+        with patch.object(scanner, "_poll_mpm_logging", side_effect=TimeoutError("stuck")):
+            with pytest.raises(TimeoutError, match="stuck"):
+                scanner.run_single_scan(plot=False)
+
+        assert mpm.stop_logging.call_count >= 2
+        tsl.stop_sweep.assert_called()
 
 
 class TestScannerSingleScan:
@@ -348,13 +462,14 @@ class TestScannerSingleScan:
         tsl, mpm = _make_mock_tsl(), _make_mock_mpm()
         scanner = Scanner(tsl, mpm)
         scanner.configure(
-            start_wl=1500, stop_wl=1504, step=1, speed=50, power=0
+            start_wl=1500, stop_wl=1500.04, step=0.01, speed=50, power=0
         )
         return scanner, tsl, mpm
 
     def test_single_scan_returns_scan_result(self):
         scanner, tsl, mpm = self._configured_scanner()
-        result = scanner.run_single_scan(mpm_range=2, plot=False, save_csv=None)
+        with patch("santecpro.scanner.time.sleep"):
+            result = scanner.run_single_scan(mpm_range=2, plot=False, save_csv=None)
 
         assert isinstance(result, ScanResult)
         assert len(result.powers) == 5
@@ -367,7 +482,7 @@ class TestScannerSingleScan:
             result.monitor_powers, [7.5, 7.6, 7.7, 7.8, 7.9]
         )
         np.testing.assert_array_almost_equal(
-            result.wavelengths, [1500.0, 1501.0, 1502.0, 1503.0, 1504.0]
+            result.wavelengths, [1500.0, 1500.01, 1500.02, 1500.03, 1500.04]
         )
 
     def test_single_scan_sequence(self):
@@ -376,36 +491,50 @@ class TestScannerSingleScan:
 
         # Track call order
         call_order = []
-
         def record(name):
             def wrapper(*args, **kwargs):
                 call_order.append(name)
             return wrapper
 
         mpm.set_range.side_effect = record("mpm.set_range")
-        mpm.set_measurement_mode.side_effect = record("mpm.set_measurement_mode")
         mpm.set_trigger_input.side_effect = record("mpm.set_trigger_input")
-        tsl.set_scan_start_mode.side_effect = record("tsl.set_scan_start_mode")
         mpm.start_logging.side_effect = record("mpm.start_logging")
         tsl.start_sweep.side_effect = record("tsl.start_sweep")
         tsl.soft_trigger.side_effect = record("tsl.soft_trigger")
         mpm.stop_logging.side_effect = record("mpm.stop_logging")
         tsl.stop_sweep.side_effect = record("tsl.stop_sweep")
 
-        scanner.run_single_scan(mpm_range=2, plot=False, save_csv=None)
+        with patch("santecpro.scanner.time.sleep"):
+            scanner.run_single_scan(mpm_range=2, plot=False, save_csv=None)
 
-        # Verify key ordering constraints
+        # Verify key ordering constraints:
+        # 1. MPM range/trigger set before logging starts
+        # 2. TSL enters trigger standby before MPM logging starts
+        # 3. MPM logging starts before soft trigger releases the sweep
+        # 4. Soft-triggered sweep starts before MPM stops logging
         assert call_order.index("mpm.set_range") < call_order.index("mpm.start_logging")
-        assert call_order.index("tsl.set_scan_start_mode") < call_order.index("tsl.start_sweep")
-        assert call_order.index("mpm.start_logging") < call_order.index("tsl.start_sweep")
-        assert call_order.index("tsl.start_sweep") < call_order.index("tsl.soft_trigger")
-        assert call_order.index("tsl.soft_trigger") < call_order.index("mpm.stop_logging")
+        assert call_order.index("tsl.start_sweep") < call_order.index("mpm.start_logging")
+        assert call_order.index("mpm.start_logging") < call_order.index("tsl.soft_trigger")
+        final_stop_index = len(call_order) - 1 - call_order[::-1].index("mpm.stop_logging")
+        assert call_order.index("tsl.soft_trigger") < final_stop_index
 
-        # Verify specific calls
+        # Verify specific calls with correct int params
         mpm.set_range.assert_called_once_with(2)
-        mpm.set_measurement_mode.assert_called_once_with("SWEEP1")
-        mpm.set_trigger_input.assert_called_once_with("EXTERNAL")
-        tsl.set_scan_start_mode.assert_called_once_with("WAITING_FOR_TRIGGER")
+        mpm.set_trigger_input.assert_called_once_with(1)  # 1 = External
+        tsl.soft_trigger.assert_called_once()
+
+    def test_single_scan_fills_nan_monitor_when_tsl_monitor_read_fails(self):
+        scanner, tsl, mpm = self._configured_scanner()
+        tsl.get_power_monitor_data.side_effect = UnicodeDecodeError(
+            "ascii", b"\xe1", 0, 1, "ordinal not in range"
+        )
+
+        with patch("santecpro.scanner.time.sleep"):
+            result = scanner.run_single_scan(mpm_range=2, plot=False, save_csv=None)
+
+        assert len(result.powers) == 5
+        assert len(result.monitor_powers) == 5
+        assert np.isnan(result.monitor_powers).all()
 
 
 class TestScannerMultiRange:
@@ -415,10 +544,11 @@ class TestScannerMultiRange:
         tsl, mpm = _make_mock_tsl(), _make_mock_mpm()
         scanner = Scanner(tsl, mpm)
         scanner.configure(
-            start_wl=1500, stop_wl=1504, step=1, speed=50, power=0
+            start_wl=1500, stop_wl=1500.04, step=0.01, speed=50, power=0
         )
 
-        results = scanner.run_multi_range_scan(
+        with patch("santecpro.scanner.time.sleep"):
+            results = scanner.run_multi_range_scan(
             ranges=[1, 3], plot=False, save_raw_csv=None
         )
 
@@ -431,14 +561,15 @@ class TestScannerMultiRange:
         tsl, mpm = _make_mock_tsl(), _make_mock_mpm()
         scanner = Scanner(tsl, mpm)
         scanner.configure(
-            start_wl=1500, stop_wl=1504, step=1, speed=50, power=0
+            start_wl=1500, stop_wl=1500.04, step=0.01, speed=50, power=0
         )
 
         # Patch merge_multi_range to verify it gets called
-        with patch("santecpro.scanner.merge_multi_range") as mock_merge:
+        with patch("santecpro.scanner.time.sleep"), \
+             patch("santecpro.scanner.merge_multi_range") as mock_merge:
             # Configure the mock to return a plausible ScanResult
             mock_merge.return_value = ScanResult(
-                wavelengths=np.linspace(1500, 1504, 5),
+                wavelengths=np.linspace(1500, 1500.04, 5),
                 powers=np.full(5, -10.0),
                 monitor_powers=np.full(5, 7.5),
                 mpm_range=0,
@@ -459,10 +590,11 @@ class TestScannerILMeasurement:
         tsl, mpm = _make_mock_tsl(), _make_mock_mpm()
         scanner = Scanner(tsl, mpm)
         scanner.configure(
-            start_wl=1500, stop_wl=1504, step=1, speed=50, power=0
+            start_wl=1500, stop_wl=1500.04, step=0.01, speed=50, power=0
         )
 
-        il_result = scanner.run_il_measurement(
+        with patch("santecpro.scanner.time.sleep"):
+            il_result = scanner.run_il_measurement(
             ranges=[1], plot=False, save_raw_csv=None, save_loss_csv=None
         )
 
@@ -487,8 +619,11 @@ class TestScannerPolling:
     def test_poll_completes_immediately(self):
         tsl, mpm = _make_mock_tsl(), _make_mock_mpm()
         scanner = Scanner(tsl, mpm)
+        with patch("santecpro.scanner.time") as mock_time:
+            mock_time.monotonic.side_effect = [0, 0.1]
+            mock_time.sleep.return_value = None
+            scanner._poll_mpm_logging(timeout=1.0)
         # Default mock returns (1, 5) i.e. COMPLETED
-        scanner._poll_mpm_logging(timeout=1.0)
         mpm.get_logging_status.assert_called_once()
 
     def test_poll_retries_then_completes(self):

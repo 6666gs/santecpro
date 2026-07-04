@@ -11,6 +11,13 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from santecpro.instruments.mpm import MPM_RANGES
+from santecpro.instruments.tsl import (
+    SWEEP_MODE_CONT_ONE_WAY,
+    SWEEP_STATUS_TRIGGER_STANDBY,
+    TRIG_OUT_STEP,
+)
+from santecpro.instruments.mpm import MEAS_MODE_SWEEP1
+from santecpro.sweep_rules import validate_sts_sweep_params
 
 if TYPE_CHECKING:
     from santecpro.instruments.tsl import TSLInstrument
@@ -18,7 +25,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_POLL_INTERVAL = 0.2
+_POLL_INTERVAL = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +52,18 @@ class ScanResult:
     scan_params: dict = field(default_factory=dict)
     timestamp: str = ""
     mpm_range: int = 1
+    channel_powers: dict[int, np.ndarray] = field(default_factory=dict)
+
+    def powers_for_channel(self, channel: int) -> np.ndarray:
+        """Return powers for a channel, falling back to the legacy single trace."""
+        return self.channel_powers.get(int(channel), self.powers)
+
+    def channels(self) -> list[int]:
+        """Return channels included in this result."""
+        if self.channel_powers:
+            return sorted(self.channel_powers)
+        channel = self.scan_params.get("mpm_channel", 1)
+        return [int(channel)]
 
 
 @dataclass
@@ -204,10 +223,11 @@ class Scanner:
         step: float,
         speed: float,
         power: float,
-        sweep_mode: str = "CONTINUOUS_ONE_WAY",
+        sweep_mode: int = SWEEP_MODE_CONT_ONE_WAY,
         ranges: list[int] | None = None,
         mpm_channel: int = 1,
         mpm_module: int = 1,
+        mpm_averaging_time_ms: float = 0.01,
     ) -> None:
         """Store scan parameters and configure both instruments.
 
@@ -217,10 +237,14 @@ class Scanner:
             step: Wavelength step in nm.
             speed: Sweep speed in nm/s.
             power: Output power in dBm.
-            sweep_mode: TSL sweep mode string.
+            sweep_mode: TSL sweep mode number (0-3). Use constants from
+                ``santecpro.instruments.tsl`` (e.g. ``SWEEP_MODE_CONT_ONE_WAY``).
             ranges: Optional list of MPM range numbers for multi-range scans.
             mpm_channel: MPM channel to read (1-based).
             mpm_module: MPM module to read (1-based).
+            mpm_averaging_time_ms: MPM integration time in ms. This must be
+                comfortably shorter than ``step / speed`` to avoid missing
+                external trigger pulses.
         """
         self._config = {
             "start_wl": start_wl,
@@ -232,20 +256,42 @@ class Scanner:
             "ranges": ranges or [1],
             "mpm_channel": mpm_channel,
             "mpm_module": mpm_module,
+            "mpm_averaging_time_ms": mpm_averaging_time_ms,
         }
+        validate_sts_sweep_params(start_wl, stop_wl, step, speed)
+
+        self._mpm.stop_logging()
+        self._warn_mpm_error_state("before configure")
 
         # Configure TSL
         self._tsl.set_power(power)
         self._tsl.set_sweep_mode(sweep_mode)
         self._tsl.configure_sweep(start_wl, stop_wl, step, speed)
-        self._tsl.set_trigger_output("STEP")
+        self._verify_tsl_sweep_configuration(start_wl, stop_wl, step, speed, sweep_mode)
+        self._tsl.set_trigger_output(TRIG_OUT_STEP)
+        self._tsl.set_trigger_step_width(step)
+        actual_trigger_step = self._tsl.get_trigger_step_width()
+        if not np.isclose(actual_trigger_step, step, rtol=0.0, atol=1e-6):
+            raise RuntimeError(
+                f"TSL trigger step mismatch: requested {step:.6f} nm, "
+                f"instrument reports {actual_trigger_step:.6f} nm"
+            )
+        self._tsl.set_scan_start_mode(1)  # 1 = wait for software trigger
 
         # Configure MPM
-        self._mpm.set_unit("dBm")
-        self._mpm.set_range_mode("MANUAL")
-
-        data_points = int(round((stop_wl - start_wl) / step)) + 1
-        self._mpm.set_logging_data_points(data_points)
+        self._mpm.set_unit(0)  # 0 = dBm
+        self._mpm.set_range_mode(0)  # 0 = Manual
+        self._mpm.set_measurement_mode(MEAS_MODE_SWEEP1)
+        self._mpm.set_sweep_wavelength(start_wl, stop_wl, step)
+        self._mpm.set_sweep_speed(speed)
+        self._mpm.set_averaging_time(mpm_averaging_time_ms)
+        expected_points = self._expected_points(start_wl, stop_wl, step)
+        actual_points = self._mpm.get_logging_data_points()
+        if actual_points != expected_points:
+            raise RuntimeError(
+                f"MPM LOGN mismatch: expected {expected_points}, instrument reports {actual_points}"
+            )
+        # SWEEP1 mode: LOGN is auto-calculated from WSET, no need to set manually
 
     # ------------------------------------------------------------------
     # Single-range scan
@@ -271,40 +317,54 @@ class Scanner:
         ch = self._config.get("mpm_channel", 1)
         mod = self._config.get("mpm_module", 1)
 
+        self._mpm.stop_logging()
+        self._warn_mpm_error_state("before scan")
+
         # Prepare MPM
         self._mpm.set_range(mpm_range)
-        self._mpm.set_measurement_mode("SWEEP1")
-        self._mpm.set_trigger_input("EXTERNAL")
+        self._mpm.set_trigger_input(1)  # 1 = External trigger
+        logger.info("MPM range=%d, trigger=external", mpm_range)
 
-        # Prepare TSL
-        self._tsl.set_scan_start_mode("WAITING_FOR_TRIGGER")
-
-        # Start MPM logging first
-        self._mpm.start_logging()
-
-        # Start TSL sweep
+        # Put the TSL into trigger standby before arming the MPM. The actual
+        # sweep is released by one software trigger after the MPM is ready.
         self._tsl.start_sweep()
+        self._wait_for_tsl_status(SWEEP_STATUS_TRIGGER_STANDBY, timeout=5.0)
 
-        # Soft trigger to begin
-        self._tsl.soft_trigger()
+        self._mpm.start_logging()
+        logger.info("MPM MEAS sent, waiting for hardware arm...")
+        time.sleep(0.3)
 
-        # Poll MPM until logging completes
-        self._poll_mpm_logging()
+        try:
+            self._tsl.soft_trigger()
+            logger.info("TSL sweep released by software trigger")
 
-        # Stop logging and sweep
-        self._mpm.stop_logging()
-        self._tsl.stop_sweep()
+            # Do not poll the MPM during the sweep; GPIB traffic to the power meter
+            # can disturb time-critical external-trigger logging on some setups.
+            self._wait_for_expected_sweep()
+            self._poll_mpm_logging(timeout=30.0)
+        finally:
+            self._stop_instruments_after_scan()
 
         # Retrieve data
         powers_list = self._mpm.get_channel_logging_data(mod, ch)
         powers = np.array(powers_list, dtype=float)
 
-        monitor_list = self._tsl.get_power_monitor_data()
-        monitor_powers = np.array(monitor_list, dtype=float)
-
         wavelengths = np.linspace(
             self._config["start_wl"], self._config["stop_wl"], len(powers)
         )
+        try:
+            monitor_list = self._tsl.get_power_monitor_data()
+            monitor_powers = np.array(monitor_list, dtype=float)
+            if len(monitor_powers) != len(powers):
+                logger.warning(
+                    "TSL monitor length mismatch: got %d, expected %d; filling with NaN",
+                    len(monitor_powers),
+                    len(powers),
+                )
+                monitor_powers = np.full(len(powers), np.nan)
+        except Exception as exc:
+            logger.warning("Could not read TSL monitor data; filling with NaN: %s", exc)
+            monitor_powers = np.full(len(powers), np.nan)
 
         timestamp = datetime.now(timezone.utc).isoformat()
 
@@ -404,8 +464,10 @@ class Scanner:
             ScanResult for the reference scan.
         """
         ch = self._config.get("mpm_channel", 1)
+        mod = self._config.get("mpm_module", 1)
         if mpm_range is None:
-            current_power = self._mpm.get_power(ch)
+            powers = self._mpm.get_power(mod)
+            current_power = powers[ch - 1]
             mpm_range = self._mpm.select_optimal_range(current_power)
         return self.run_single_scan(mpm_range=mpm_range, plot=False, save_csv=None)
 
@@ -467,9 +529,27 @@ class Scanner:
             TimeoutError: If the logging does not complete within *timeout*.
         """
         deadline = time.monotonic() + timeout
+        poll_count = 0
         while True:
             status, count = self._mpm.get_logging_status()
+            poll_count += 1
+            if poll_count <= 5 or poll_count % 5 == 0:
+                logger.info("MPM STAT? → status=%d, count=%d", status, count)
             if status == 1:  # COMPLETED
+                logger.info("MPM measurement complete: %d data points", count)
+                expected = None
+                if {"start_wl", "stop_wl", "step"} <= self._config.keys():
+                    expected = self._expected_points(
+                        self._config["start_wl"],
+                        self._config["stop_wl"],
+                        self._config["step"],
+                    )
+                if expected is not None and count != expected:
+                    raise RuntimeError(
+                        f"MPM completed with {count} data points, expected {expected}. "
+                        "This means trigger pulses were missed; reduce sweep speed or "
+                        "increase wavelength step."
+                    )
                 return
             if time.monotonic() >= deadline:
                 raise TimeoutError(
@@ -477,3 +557,114 @@ class Scanner:
                     f"(last status={status}, count={count})"
                 )
             time.sleep(_POLL_INTERVAL)
+
+    def _expected_sweep_wait(self) -> float:
+        """Return a conservative scan wait time in seconds."""
+        start = self._config["start_wl"]
+        stop = self._config["stop_wl"]
+        speed = self._config["speed"]
+        return abs(stop - start) / speed + 2.0
+
+    def _wait_for_expected_sweep(self) -> None:
+        """Wait through the expected sweep duration while logging progress."""
+        wait_s = self._expected_sweep_wait()
+        logger.info("Waiting %.1fs for TSL sweep to finish before polling MPM", wait_s)
+        deadline = time.monotonic() + wait_s
+        next_log = time.monotonic() + 5.0
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(1.0, remaining))
+            now = time.monotonic()
+            if now >= next_log:
+                logger.info("Sweep wait in progress: %.1fs remaining", max(0.0, deadline - now))
+                next_log = now + 5.0
+
+    @staticmethod
+    def _expected_points(start: float, stop: float, step: float) -> int:
+        return int(round(abs(stop - start) / step)) + 1
+
+    def _verify_tsl_sweep_configuration(
+        self,
+        start_wl: float,
+        stop_wl: float,
+        step: float,
+        speed: float,
+        sweep_mode: int,
+    ) -> None:
+        """Read back TSL sweep settings and fail if the instrument rejected them."""
+        actual_mode = self._tsl.get_sweep_mode()
+        actual_start = self._tsl.get_sweep_start()
+        actual_stop = self._tsl.get_sweep_stop()
+        actual_step = self._tsl.get_sweep_step()
+        actual_speed = self._tsl.get_sweep_speed()
+        logger.info(
+            "TSL readback: mode=%s, start=%.6f nm, stop=%.6f nm, step=%.6f nm, speed=%.3f nm/s",
+            actual_mode,
+            actual_start,
+            actual_stop,
+            actual_step,
+            actual_speed,
+        )
+        if actual_mode != sweep_mode:
+            raise RuntimeError(
+                f"TSL sweep mode mismatch: requested {sweep_mode}, instrument reports {actual_mode}"
+            )
+        if not np.isclose(actual_start, start_wl, rtol=0.0, atol=5e-7):
+            raise RuntimeError(
+                f"TSL sweep start mismatch: requested {start_wl:.6f} nm, "
+                f"instrument reports {actual_start:.6f} nm"
+            )
+        if not np.isclose(actual_stop, stop_wl, rtol=0.0, atol=5e-7):
+            raise RuntimeError(
+                f"TSL sweep stop mismatch: requested {stop_wl:.6f} nm, "
+                f"instrument reports {actual_stop:.6f} nm"
+            )
+        if not np.isclose(actual_step, step, rtol=0.0, atol=5e-7):
+            raise RuntimeError(
+                f"TSL sweep step mismatch: requested {step:.6f} nm, "
+                f"instrument reports {actual_step:.6f} nm"
+            )
+        if not np.isclose(actual_speed, speed, rtol=0.0, atol=1e-3):
+            raise RuntimeError(
+                f"TSL sweep speed mismatch: requested {speed:.3f} nm/s, "
+                f"instrument reports {actual_speed:.3f} nm/s"
+            )
+
+    def _warn_mpm_error_state(self, context: str) -> None:
+        """Log the MPM error state without using it as a pre-scan interlock."""
+        try:
+            code, message = self._mpm.get_error()
+        except Exception as exc:
+            logger.warning("Could not query MPM ERR? %s: %s", context, exc)
+            return
+        if code != 0:
+            logger.warning("MPM ERR? %s returned %d,%s", context, code, message)
+
+    def _stop_instruments_after_scan(self) -> None:
+        """Best-effort cleanup so failed scans do not leave devices armed."""
+        for name, stop in (
+            ("MPM logging", self._mpm.stop_logging),
+            ("TSL sweep", self._tsl.stop_sweep),
+        ):
+            try:
+                stop()
+                logger.info("Stopped %s", name)
+            except Exception as exc:
+                logger.warning("Could not stop %s: %s", name, exc)
+
+    def _wait_for_tsl_status(self, expected_status: int, timeout: float) -> None:
+        """Poll TSL sweep status until it reaches ``expected_status``."""
+        deadline = time.monotonic() + timeout
+        last_status = None
+        while True:
+            last_status = self._tsl.get_sweep_status()
+            if str(last_status).strip().startswith(str(expected_status)):
+                return
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"TSL did not reach sweep status {expected_status} "
+                    f"within {timeout}s (last status={last_status})"
+                )
+            time.sleep(0.1)

@@ -5,6 +5,7 @@ __version__ = "1.0.0"
 from santecpro.instruments.tsl import TSLInstrument
 from santecpro.instruments.mpm import MPMInstrument
 from santecpro.scanner import Scanner, ScanResult, ILMeasurement
+from santecpro.remote import RemoteScanner
 
 __all__ = [
     "TSLInstrument",
@@ -12,4 +13,5 @@ __all__ = [
     "Scanner",
     "ScanResult",
     "ILMeasurement",
+    "RemoteScanner",
 ]

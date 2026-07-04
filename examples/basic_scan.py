@@ -1,55 +1,53 @@
 #!/usr/bin/env python3
-"""Basic scan example for Santec TSL-550 + MPM-210.
+"""远程扫描示例 — Mac 端通过 HTTP 控制 Windows 上的 Santec 设备。
 
-Usage:
+用法:
     python examples/basic_scan.py
 
-Prerequisites:
-    - NI-VISA runtime installed
-    - TSL-550 connected via GPIB (default address: 10)
-    - MPM-210 connected via GPIB (default address: 17)
+前提条件:
+    - Windows 电脑运行 server.py，连接 TSL-550 和 MPM-210
+    - Mac 和 Windows 在同一局域网
+    - pip install requests numpy matplotlib
 """
 
-import pyvisa
-from santecpro import TSLInstrument, MPMInstrument, Scanner
+import logging
+from santecpro import RemoteScanner
+
+# 开启日志
+logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
 
 
 def main():
-    # Initialize VISA resource manager
-    rm = pyvisa.ResourceManager()
+    # Windows 服务器地址（修改为实际 IP）
+    SERVER_URL = "http://192.168.1.103:5000"
 
-    # Print available resources
-    print("Available VISA resources:")
-    for r in rm.list_resources():
-        print(f"  {r}")
+    scanner = RemoteScanner(SERVER_URL)
 
-    # Connect to instruments
-    print("\nConnecting to TSL-550...")
-    tsl = TSLInstrument(rm)
-    tsl.connect("GPIB0::10::INSTR")
-    print(f"  TSL IDN: {tsl.idn}")
+    # 查询服务器状态
+    print("Server status:", scanner.status())
 
-    print("Connecting to MPM-210...")
-    mpm = MPMInstrument(rm)
-    mpm.connect("GPIB0::17::INSTR")
-    print(f"  MPM IDN: {mpm.idn}")
+    # 连接仪器
+    print("\nConnecting to instruments...")
+    scanner.connect(
+        tsl_address="GPIB3::1::INSTR",
+        mpm_address="GPIB0::16::INSTR",
+    )
 
-    # Turn on laser
-    tsl.laser_on()
-    tsl.shutter_open()
+    # 开启激光器
+    scanner.laser_on()
 
-    # Configure and run a basic scan
-    scanner = Scanner(tsl, mpm)
+    # 配置扫描参数
     scanner.configure(
         start_wl=1550.0,
         stop_wl=1560.0,
         step=0.01,
-        speed=20.0,
-        power=0.0,
-        sweep_mode="CONTINUOUS_ONE_WAY",
+        speed=2.0,
+        power=1.0,
+        sweep_mode=1,  # Continuous One-way (see tsl.SWEEP_MODE_CONT_ONE_WAY)
         ranges=[1],
     )
 
+    # 执行单次扫描
     print("\nStarting scan...")
     result = scanner.run_single_scan(
         mpm_range=1,
@@ -57,15 +55,16 @@ def main():
         save_csv="scan_result_raw.csv",
     )
     print(f"Scan complete: {len(result.wavelengths)} data points")
-    print(f"Wavelength range: {result.wavelengths[0]:.3f} - {result.wavelengths[-1]:.3f} nm")
+    print(
+        f"Wavelength range: {result.wavelengths[0]:.3f} - {result.wavelengths[-1]:.3f} nm"
+    )
     print(f"Power range: {result.powers.min():.2f} - {result.powers.max():.2f} dBm")
 
-    # Cleanup
-    tsl.shutter_close()
-    tsl.laser_off()
-    tsl.disconnect()
-    mpm.disconnect()
-    rm.close()
+    # 关闭激光器
+    scanner.laser_off()
+
+    # 断开连接
+    scanner.disconnect()
     print("\nDone.")
 
 

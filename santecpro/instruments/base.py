@@ -26,7 +26,12 @@ class BaseInstrument:
     def is_connected(self) -> bool:
         return self._resource is not None
 
-    def connect(self, resource_string: str, terminator: str = "\r") -> None:
+    def connect(
+        self,
+        resource_string: str,
+        terminator: str = "\r",
+        read_terminator: str | None = None,
+    ) -> None:
         """Open a VISA resource and configure terminator."""
         if self._resource is not None:
             raise InstrumentConnectionError(
@@ -39,7 +44,7 @@ class BaseInstrument:
                 f"Failed to connect to {resource_string}: {exc}"
             ) from exc
         self._resource.write_termination = terminator
-        self._resource.read_termination = terminator
+        self._resource.read_termination = read_terminator or terminator
 
     def disconnect(self) -> None:
         """Close the VISA resource."""
@@ -56,7 +61,7 @@ class BaseInstrument:
         self._require_connected()
         if self._trace:
             _trace_logger.debug("Q: %s", command)
-        response = self._resource.query(command)
+        response = self._resource.query(command).strip()
         if self._trace:
             _trace_logger.debug("R: %s", response)
         return response

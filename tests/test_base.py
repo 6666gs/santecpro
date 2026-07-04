@@ -20,6 +20,12 @@ class TestBaseInstrument:
         assert mock_resource.write_termination == "\r"
         assert mock_resource.read_termination == "\r"
 
+    def test_connect_sets_separate_read_terminator(self, mock_resource_manager, mock_resource):
+        inst = BaseInstrument(mock_resource_manager)
+        inst.connect("GPIB0::10::INSTR", terminator="\r", read_terminator="\n")
+        assert mock_resource.write_termination == "\r"
+        assert mock_resource.read_termination == "\n"
+
     def test_connect_already_connected_raises(self, mock_resource_manager):
         inst = BaseInstrument(mock_resource_manager)
         inst.connect("GPIB0::10::INSTR")
@@ -34,7 +40,7 @@ class TestBaseInstrument:
         assert inst._resource is None
 
     def test_query_sends_command_and_returns_response(self, mock_resource_manager, mock_resource):
-        mock_resource.query.return_value = "5.000"
+        mock_resource.query.return_value = "5.000\r\n"
         inst = BaseInstrument(mock_resource_manager)
         inst.connect("GPIB0::10::INSTR")
         result = inst.query("POW:LEV?")
