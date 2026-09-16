@@ -3,8 +3,8 @@ job two_pass
 device "device_001"
 output "~/Measurements/santec"
 
-# 功率 dBm；MPM 量程编号；通道；平均时间 ms
-set power=0 range=1 channels=1 averaging=0.01
+# 功率 dBm；MPM 量程编号；通道
+set power=0 range=1 channels=1
 
 scan wide 1500 1630 step=1pm speed=20
 # 上一次扫描完成、CSV 和 manifest 保存后开始计时

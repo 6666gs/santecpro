@@ -21,7 +21,7 @@ def _parse_idn(idn: str) -> dict:
     Returns:
         Dictionary with keys ``vendor``, ``model``, ``serial``, ``firmware``.
     """
-    parts = idn.split(",")
+    parts = [part.strip() for part in idn.split(",")]
     return {
         "vendor": parts[0] if len(parts) > 0 else "",
         "model": parts[1] if len(parts) > 1 else "",
@@ -30,7 +30,7 @@ def _parse_idn(idn: str) -> dict:
     }
 
 
-def _write_header(writer, tsl_idn: str, mpm_idn: str, params: dict, timestamp: str):
+def _write_header(writer, tsl_idn: str, mpm_idn: str, params: dict, timestamp: str, *, mpm_range: int):
     """Write the 14-line metadata header common to both CSV formats.
 
     Args:
@@ -39,6 +39,7 @@ def _write_header(writer, tsl_idn: str, mpm_idn: str, params: dict, timestamp: s
         mpm_idn: ``*IDN?`` response from the MPM.
         params: Scan parameters dictionary.
         timestamp: ISO-8601 timestamp string.
+        mpm_range: MPM range index stored with this scan (not a dBm value).
     """
     from santecpro import __version__
 
@@ -63,7 +64,7 @@ def _write_header(writer, tsl_idn: str, mpm_idn: str, params: dict, timestamp: s
         ["Speed", f"{params.get('speed', 0):.6f}", "nm/s", "", ""],
         ["Source power", f"{params.get('power', 0):.6f}", "dBm", "", ""],
         ["Averaging Time", f"{params['mpm_averaging_time_ms'] / 1000:.6f}" if "mpm_averaging_time_ms" in params else "", "s", "", ""],
-        ["Power meter range", params.get("power_meter_range_dbm", ""), "dBm", "", ""],
+        ["Power meter range", params.get("power_meter_range_dbm", ""), "dBm", "MPM range", mpm_range],
         ["TSL PM- range", params.get("tsl_pm_range", ""), "", "", ""],
     ]
     writer.writerows(rows)
@@ -104,7 +105,8 @@ def save_raw_csv(
                *[f"Raw_M{module}-Ch{ch}-R1(dBm)" for ch in channels], "", ""]
     with open(filepath, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        _write_header(writer, tsl_idn, mpm_idn, scan.scan_params, scan.timestamp)
+        _write_header(writer, tsl_idn, mpm_idn, scan.scan_params, scan.timestamp,
+                      mpm_range=scan.mpm_range)
         writer.writerow(headers)
         for i, wl in enumerate(scan.wavelengths):
             writer.writerow([f"{wl:.5f}", f"{scan.monitor_powers[i]:.5f}",
@@ -143,7 +145,8 @@ def _save_loss_columns(scan, losses, tsl_idn, mpm_idn, filepath, *, wavelengths=
     module = int(scan.scan_params.get("mpm_module", 0)) + 1
     with open(filepath, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        _write_header(writer, tsl_idn, mpm_idn, scan.scan_params, scan.timestamp)
+        _write_header(writer, tsl_idn, mpm_idn, scan.scan_params, scan.timestamp,
+                      mpm_range=scan.mpm_range)
         headers = ["Wavelength(nm)", *[f"IL_M{module}_CH{ch}" for ch in channels]]
         padding = [""] * max(0, 5 - len(headers))
         writer.writerow(headers + padding)

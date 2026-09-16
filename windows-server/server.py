@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import os
 import threading
 import time
@@ -34,6 +35,7 @@ except Exception:  # DLL/STSProcess server mode does not require pyvisa.
 import config
 from santec_dll_backend.instruments import DllMpm, DllTsl, ScanCancelled
 from santec_dll_backend.scanner import run_stsprocess_scan
+from alignment_cache import AlignmentMeterCache
 from stsprocess_api import build_sts_scan_settings, sts_scan_result_to_dict
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -65,6 +67,7 @@ instrument_lock = threading.RLock()
 state_lock = threading.RLock()
 scan_cancel = threading.Event()
 laser_start_requests: set[str] = set()
+alignment_meter = AlignmentMeterCache(instrument_lock)
 
 
 def exclusive_instruments(func):
@@ -74,6 +77,8 @@ def exclusive_instruments(func):
         if not instrument_lock.acquire(blocking=False):
             return jsonify({"error": "Instruments are busy."}), 409
         try:
+            if func.__name__ not in ("dll_alignment_start", "dll_mpm_powers"):
+                alignment_meter.close()
             return func(*args, **kwargs)
         finally:
             instrument_lock.release()
@@ -596,30 +601,35 @@ def dll_alignment_start():
     data = request.get_json(silent=True) or {}
     tsl_addr = data.get("tsl_address") or config.TSL_ADDRESS
     mpm_addr = data.get("mpm_address") or config.MPM_ADDRESS
-    module = int(data.get("mpm_module", 0))
-    channels = [int(ch) for ch in data.get("mpm_channels", [1])]
-    mpm_range = int(data.get("mpm_range", 1))
-    power = float(data.get("power", 0.0))
+    try:
+        module = int(data.get("mpm_module", 0))
+        channels = [int(ch) for ch in data.get("mpm_channels", [1])]
+        power = float(data.get("power", 0.0))
+        wavelength = float(data.get("wavelength", 1550.0))
+        if not math.isfinite(power) or not math.isfinite(wavelength) or wavelength <= 0:
+            raise ValueError("Power and wavelength must be finite; wavelength must be positive")
+        if not channels or any(ch < 1 or ch > 4 for ch in channels) or module < 0 or module > 4:
+            raise ValueError("Invalid MPM module or channels")
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
     try:
         with instrument_lock:
             laser = DllTsl(tsl_addr)
-            meter = DllMpm(mpm_addr)
             try:
                 laser.connect()
-                meter.connect()
+                meter = alignment_meter.get(mpm_addr, DllMpm)
                 if not laser.laser_is_on():
                     raise RuntimeError("Laser is not ready; initialize and wait for warmup first.")
+                laser.set_wavelength_nm(wavelength)
                 laser.set_power_dbm(power)
-                for channel in channels:
-                    meter.configure_power_logging(module, channel, mpm_range)
+                meter.configure_alignment(wavelength)
                 powers = meter.read_power_channels(module, channels)
+                alignment_meter.touch()
             finally:
-                try:
-                    meter.disconnect()
-                finally:
-                    laser.disconnect()
-        return jsonify({"status": "ok", "powers": {str(ch): p for ch, p in powers.items()}})
+                laser.disconnect()
+        return jsonify({"status": "ok", "range_mode": "auto", "wavelength": wavelength, "power": power, "powers": {str(ch): p for ch, p in powers.items()}})
     except Exception as e:
+        alignment_meter.close()
         logger.exception("DLL alignment start failed")
         return jsonify({"error": str(e)}), 500
 
@@ -634,14 +644,12 @@ def dll_mpm_powers():
     channels = [int(ch) for ch in data.get("mpm_channels", [1])]
     try:
         with instrument_lock:
-            meter = DllMpm(mpm_addr)
-            try:
-                meter.connect()
-                powers = meter.read_power_channels(module, channels)
-            finally:
-                meter.disconnect()
+            meter = alignment_meter.get(mpm_addr, DllMpm)
+            powers = meter.read_power_channels(module, channels)
+            alignment_meter.touch()
         return jsonify({"status": "ok", "powers": {str(ch): p for ch, p in powers.items()}})
     except Exception as e:
+        alignment_meter.close()
         logger.exception("DLL MPM power read failed")
         return jsonify({"error": str(e)}), 500
 

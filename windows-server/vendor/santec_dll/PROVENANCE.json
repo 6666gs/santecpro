@@ -1,0 +1,398 @@
+{
+  "upstream_revision": "1ed71d4173cfc9a7a99b909e4faca79cf41ca0a2",
+  "verification": "Static PE/CLR metadata and hashes only; Windows native dependencies and acquisition require hardware validation.",
+  "files": [
+    {
+      "file": "FTD2XX_NET.dll",
+      "assembly": "FTD2XX_NET",
+      "version": "1.0.14.0",
+      "public_key_token": "",
+      "machine": "0x14c",
+      "clr_flags": "0x1",
+      "sha256": "6f2f2f9ed33628bc844fd95dff622105f7bb42cf6db69bb9e9ece1503d56e592",
+      "source": "https://raw.githubusercontent.com/santec-corporation/LV_IL_Sample/1ed71d4173cfc9a7a99b909e4faca79cf41ca0a2/LV_IL_Sample/DLL/x64/FTD2XX_NET.dll",
+      "references": [
+        {
+          "name": "mscorlib",
+          "version": "2.0.0.0",
+          "token": "b77a5c561934e089"
+        },
+        {
+          "name": "System.Windows.Forms",
+          "version": "2.0.0.0",
+          "token": "b77a5c561934e089"
+        },
+        {
+          "name": "System",
+          "version": "2.0.0.0",
+          "token": "b77a5c561934e089"
+        }
+      ]
+    },
+    {
+      "file": "Ivi.Visa.dll",
+      "assembly": "Ivi.Visa",
+      "version": "5.8.0.0",
+      "public_key_token": "a128c98f1d7717c1",
+      "machine": "0x14c",
+      "clr_flags": "0x9",
+      "sha256": "e127424f67ee6d34fa5ae57bce958eed68a36575f9fee63ff3eb34d580fd1786",
+      "source": "Retained from existing santecpro bundle at commit 1c39dc6",
+      "references": [
+        {
+          "name": "mscorlib",
+          "version": "2.0.0.0",
+          "token": "b77a5c561934e089"
+        },
+        {
+          "name": "System",
+          "version": "2.0.0.0",
+          "token": "b77a5c561934e089"
+        }
+      ]
+    },
+    {
+      "file": "Keysight.Visa.dll",
+      "assembly": "Keysight.Visa",
+      "version": "18.1.0.0",
+      "public_key_token": "7a01cdb2a9131f73",
+      "machine": "0x14c",
+      "clr_flags": "0x9",
+      "sha256": "e8ae6b3cafefeccc47faf34cd7b1402e7c180a10c38fd2fd2466510ad4e6fd13",
+      "source": "https://raw.githubusercontent.com/santec-corporation/LV_IL_Sample/1ed71d4173cfc9a7a99b909e4faca79cf41ca0a2/LV_IL_Sample/DLL/x64/Keysight.Visa.dll",
+      "references": [
+        {
+          "name": "mscorlib",
+          "version": "2.0.0.0",
+          "token": "b77a5c561934e089"
+        },
+        {
+          "name": "Ivi.Visa",
+          "version": "5.8.0.0",
+          "token": "a128c98f1d7717c1"
+        },
+        {
+          "name": "System",
+          "version": "2.0.0.0",
+          "token": "b77a5c561934e089"
+        }
+      ]
+    },
+    {
+      "file": "NationalInstruments.Common.dll",
+      "assembly": "NationalInstruments.Common",
+      "version": "17.5.40.49153",
+      "public_key_token": "dc6ad606294fc298",
+      "machine": "0x14c",
+      "clr_flags": "0x9",
+      "sha256": "49737eb00ba57515de924ce1c96f20211f761e8bde2e028568aeb2bb98e42df9",
+      "source": "https://raw.githubusercontent.com/santec-corporation/LV_IL_Sample/1ed71d4173cfc9a7a99b909e4faca79cf41ca0a2/LV_IL_Sample/DLL/x64/NationalInstruments.Common.dll",
+      "references": [
+        {
+          "name": "mscorlib",
+          "version": "4.0.0.0",
+          "token": "b77a5c561934e089"
+        },
+        {
+          "name": "System.Core",
+          "version": "4.0.0.0",
+          "token": "b77a5c561934e089"
+        },
+        {
+          "name": "System",
+          "version": "4.0.0.0",
+          "token": "b77a5c561934e089"
+        },
+        {
+          "name": "System.Drawing",
+          "version": "4.0.0.0",
+          "token": "b03f5f7f11d50a3a"
+        },
+        {
+          "name": "NationalInstruments.NiLmClientDLL",
+          "version": "17.5.40.49152",
+          "token": "dc6ad606294fc298"
+        },
+        {
+          "name": "NationalInstruments.MStudioCLM",
+          "version": "17.5.40.49152",
+          "token": "dc6ad606294fc298"
+        },
+        {
+          "name": "System.Web",
+          "version": "4.0.0.0",
+          "token": "b03f5f7f11d50a3a"
+        },
+        {
+          "name": "System.Windows.Forms",
+          "version": "4.0.0.0",
+          "token": "b77a5c561934e089"
+        }
+      ]
+    },
+    {
+      "file": "NationalInstruments.DAQmx.dll",
+      "assembly": "NationalInstruments.DAQmx",
+      "version": "17.6.45.181",
+      "public_key_token": "4febd62461bf11a4",
+      "machine": "0x8664",
+      "clr_flags": "0x18",
+      "sha256": "5e334cd41647c88472e72d0fb1ce9945f5099f7d2f28d083b5f48ccd0624bbd6",
+      "source": "https://raw.githubusercontent.com/santec-corporation/LV_IL_Sample/1ed71d4173cfc9a7a99b909e4faca79cf41ca0a2/LV_IL_Sample/DLL/x64/NationalInstruments.DAQmx.dll",
+      "references": [
+        {
+          "name": "mscorlib",
+          "version": "4.0.0.0",
+          "token": "b77a5c561934e089"
+        },
+        {
+          "name": "System",
+          "version": "4.0.0.0",
+          "token": "b77a5c561934e089"
+        },
+        {
+          "name": "System.Data",
+          "version": "4.0.0.0",
+          "token": "b77a5c561934e089"
+        },
+        {
+          "name": "System.Drawing",
+          "version": "4.0.0.0",
+          "token": "b03f5f7f11d50a3a"
+        },
+        {
+          "name": "System.Windows.Forms",
+          "version": "4.0.0.0",
+          "token": "b77a5c561934e089"
+        },
+        {
+          "name": "System.Xml",
+          "version": "4.0.0.0",
+          "token": "b77a5c561934e089"
+        },
+        {
+          "name": "Microsoft.VisualC",
+          "version": "10.0.0.0",
+          "token": "b03f5f7f11d50a3a"
+        },
+        {
+          "name": "NationalInstruments.Common",
+          "version": "17.5.40.49153",
+          "token": "dc6ad606294fc298"
+        }
+      ]
+    },
+    {
+      "file": "NationalInstruments.NI4882.dll",
+      "assembly": "NationalInstruments.NI4882",
+      "version": "13.0.40.159",
+      "public_key_token": "dc6ad606294fc298",
+      "machine": "0x14c",
+      "clr_flags": "0x9",
+      "sha256": "0936283a2d975f3fea4d635c5702c2e6992c98e89e062bd91e77315064608ea7",
+      "source": "https://raw.githubusercontent.com/santec-corporation/LV_IL_Sample/1ed71d4173cfc9a7a99b909e4faca79cf41ca0a2/LV_IL_Sample/DLL/x64/NationalInstruments.NI4882.dll",
+      "references": [
+        {
+          "name": "mscorlib",
+          "version": "4.0.0.0",
+          "token": "b77a5c561934e089"
+        },
+        {
+          "name": "NationalInstruments.Common",
+          "version": "13.0.40.188",
+          "token": "dc6ad606294fc298"
+        },
+        {
+          "name": "System",
+          "version": "4.0.0.0",
+          "token": "b77a5c561934e089"
+        }
+      ]
+    },
+    {
+      "file": "NationalInstruments.NiLmClientDLL.dll",
+      "assembly": "NationalInstruments.NiLmClientDLL",
+      "version": "17.5.40.49152",
+      "public_key_token": "dc6ad606294fc298",
+      "machine": "0x14c",
+      "clr_flags": "0x9",
+      "sha256": "89626849c551b25f9966611c54f362b1909dc47e98584e02ad0f808bcece671e",
+      "source": "Retained from existing santecpro bundle at commit 1c39dc6",
+      "references": [
+        {
+          "name": "mscorlib",
+          "version": "4.0.0.0",
+          "token": "b77a5c561934e089"
+        },
+        {
+          "name": "System",
+          "version": "4.0.0.0",
+          "token": "b77a5c561934e089"
+        }
+      ]
+    },
+    {
+      "file": "NationalInstruments.Visa.dll",
+      "assembly": "NationalInstruments.Visa",
+      "version": "17.0.0.0",
+      "public_key_token": "2eaa5af0834e221d",
+      "machine": "0x14c",
+      "clr_flags": "0x9",
+      "sha256": "15c94b87ed787f63997a438544b9ff12127d76aeb1eef397b0cc8b7db2451465",
+      "source": "https://raw.githubusercontent.com/santec-corporation/LV_IL_Sample/1ed71d4173cfc9a7a99b909e4faca79cf41ca0a2/LV_IL_Sample/DLL/NationalInstruments.Visa.dll",
+      "references": [
+        {
+          "name": "mscorlib",
+          "version": "4.0.0.0",
+          "token": "b77a5c561934e089"
+        },
+        {
+          "name": "Ivi.Visa",
+          "version": "5.6.0.0",
+          "token": "a128c98f1d7717c1"
+        },
+        {
+          "name": "NationalInstruments.Common",
+          "version": "13.5.40.173",
+          "token": "dc6ad606294fc298"
+        },
+        {
+          "name": "mscorlib",
+          "version": "2.0.0.0",
+          "token": "b77a5c561934e089"
+        },
+        {
+          "name": "System.Core",
+          "version": "4.0.0.0",
+          "token": "b77a5c561934e089"
+        }
+      ]
+    },
+    {
+      "file": "NationalInstruments.VisaNS.dll",
+      "assembly": "NationalInstruments.VisaNS",
+      "version": "13.0.40.167",
+      "public_key_token": "dc6ad606294fc298",
+      "machine": "0x14c",
+      "clr_flags": "0x9",
+      "sha256": "4af83b844d14140822dfd365f9d8516298675bb2a9dd3061262b7768e0f2e79b",
+      "source": "https://raw.githubusercontent.com/santec-corporation/LV_IL_Sample/1ed71d4173cfc9a7a99b909e4faca79cf41ca0a2/LV_IL_Sample/DLL/x64/NationalInstruments.VisaNS.dll",
+      "references": [
+        {
+          "name": "mscorlib",
+          "version": "4.0.0.0",
+          "token": "b77a5c561934e089"
+        },
+        {
+          "name": "NationalInstruments.Common",
+          "version": "13.0.40.188",
+          "token": "dc6ad606294fc298"
+        },
+        {
+          "name": "System",
+          "version": "4.0.0.0",
+          "token": "b77a5c561934e089"
+        }
+      ]
+    },
+    {
+      "file": "STSProcess.dll",
+      "assembly": "STSProcess",
+      "version": "2.2.7.0",
+      "public_key_token": "",
+      "machine": "0x8664",
+      "clr_flags": "0x1",
+      "sha256": "a17b14b25f97e7114e6ab12f6d6917c5d17940be37530fb2896732a14cb9cd4a",
+      "source": "Retained from existing santecpro bundle at commit 1c39dc6",
+      "references": [
+        {
+          "name": "mscorlib",
+          "version": "4.0.0.0",
+          "token": "b77a5c561934e089"
+        },
+        {
+          "name": "System.Core",
+          "version": "4.0.0.0",
+          "token": "b77a5c561934e089"
+        },
+        {
+          "name": "System",
+          "version": "4.0.0.0",
+          "token": "b77a5c561934e089"
+        },
+        {
+          "name": "System.Windows.Forms",
+          "version": "4.0.0.0",
+          "token": "b77a5c561934e089"
+        }
+      ]
+    },
+    {
+      "file": "Santec.Instrument.dll",
+      "assembly": "InstrumentDLL",
+      "version": "2.9.1.0",
+      "public_key_token": "",
+      "machine": "0x8664",
+      "clr_flags": "0x1",
+      "sha256": "59abb17503efffed32a090becd26954773558cdcaa1b561e326e8b11d0b507c6",
+      "source": "Retained from existing santecpro bundle at commit 1c39dc6",
+      "references": [
+        {
+          "name": "mscorlib",
+          "version": "4.0.0.0",
+          "token": "b77a5c561934e089"
+        },
+        {
+          "name": "System",
+          "version": "4.0.0.0",
+          "token": "b77a5c561934e089"
+        },
+        {
+          "name": "NationalInstruments.DAQmx",
+          "version": "17.6.45.181",
+          "token": "4febd62461bf11a4"
+        },
+        {
+          "name": "FTD2XX_NET",
+          "version": "1.0.14.0",
+          "token": ""
+        },
+        {
+          "name": "NationalInstruments.Visa",
+          "version": "17.0.0.0",
+          "token": "2eaa5af0834e221d"
+        },
+        {
+          "name": "Ivi.Visa",
+          "version": "5.11.0.0",
+          "token": "a128c98f1d7717c1"
+        },
+        {
+          "name": "NationalInstruments.NI4882",
+          "version": "13.0.40.159",
+          "token": "dc6ad606294fc298"
+        },
+        {
+          "name": "NationalInstruments.VisaNS",
+          "version": "13.0.40.167",
+          "token": "dc6ad606294fc298"
+        },
+        {
+          "name": "System.Core",
+          "version": "4.0.0.0",
+          "token": "b77a5c561934e089"
+        },
+        {
+          "name": "System.Windows.Forms",
+          "version": "4.0.0.0",
+          "token": "b77a5c561934e089"
+        },
+        {
+          "name": "Keysight.Visa",
+          "version": "18.1.0.0",
+          "token": "7a01cdb2a9131f73"
+        }
+      ]
+    }
+  ]
+}

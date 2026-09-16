@@ -29,6 +29,7 @@ def build_sts_scan_settings(data: dict[str, Any], base_dir: str) -> STSScanSetti
         mpm_range=int(data.get("mpm_range", 1)),
         mpm_averaging_time_ms=float(data.get("mpm_averaging_time_ms", 0.01)),
         csv_path=csv_path,
+        daq_device=config.DAQ_DEVICE,
     )
 
 
@@ -43,6 +44,8 @@ def sts_scan_result_to_dict(result: STSScanResult, request_data: dict[str, Any])
         "mpm_completed_points": result.mpm_completed_points,
         "csv_path": result.csv_path,
     })
+    if result.averaging_time_ms is not None:
+        scan_params["mpm_averaging_time_ms"] = result.averaging_time_ms
     return {
         "wavelengths": result.wavelengths,
         "powers": result.powers,

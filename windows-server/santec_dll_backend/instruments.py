@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import time
 
-from .loader import load_santec_dlls
+from .loader import load_santec_dlls, load_ni_daqmx
 
 
 from santecpro.exceptions import ScanCancelled
@@ -73,6 +73,11 @@ class DllTsl:
         code, response = self._tsl.Echo("*IDN?", "")
         raise_if_error(code, "TSL *IDN?")
         return str(response)
+
+    def set_wavelength_nm(self, wavelength_nm: float) -> None:
+        raise_if_error(self._tsl.Set_Wavelength_Unit(self._tsl.Wavelength_Unit.nm),
+                       "TSL Set_Wavelength_Unit nm")
+        raise_if_error(self._tsl.Set_Wavelength(wavelength_nm), "TSL Set_Wavelength")
 
     def set_power_dbm(self, power_dbm: float) -> None:
         try:
@@ -238,6 +243,17 @@ class DllMpm:
             # Some modules apply Set_Range globally for the active logging mode.
             pass
 
+    def configure_alignment(self, wavelength_nm: float) -> None:
+        """Single-point READ uses auto range, independently of scan logging ranges.
+
+        Matches Python-IL-STS MPM.set_read_range_mode('AUTO').
+        Set_Wavelength selects the meter's wavelength sensitivity correction.
+        """
+        raise_if_error(self._mpm.Set_Unit(self._mpm.Power_Unit.dBm), "MPM Set_Unit dBm")
+        raise_if_error(self._mpm.Set_Wavelength(wavelength_nm), "MPM Set_Wavelength")
+        raise_if_error(self._mpm.Set_READ_Range_Mode(self._mpm.READ_Range_Mode.Auto),
+                       "MPM Set_READ_Range_Mode Auto")
+
     def read_power_channel(self, module: int, channel: int) -> float:
         code, power = self._mpm.Get_READ_Power_Channel(module, channel, 0)
         raise_if_error(code, "MPM Get_READ_Power_Channel")
@@ -299,6 +315,11 @@ class DllMpm:
         raise_if_error(code, "MPM Get_Each_Channel_Logdata")
         return list(data)
 
+    def get_averaging_time_ms(self) -> float:
+        code, value = self._mpm.Get_Averaging_Time(0.0)
+        raise_if_error(code, "MPM Get_Averaging_Time")
+        return float(value)
+
     def get_trigger_data(self, module: int) -> list[float]:
         code, trigger = self._mpm.Get_216_Triggerdata(module, None)
         raise_if_error(code, "MPM Get_216_Triggerdata")
@@ -308,6 +329,63 @@ class DllMpm:
         code, trigger, monitor = self._mpm.Get_216_Monitordata(module, None, None)
         raise_if_error(code, "MPM Get_216_Monitordata")
         return list(trigger), list(monitor)
+
+
+class DllSpu:
+    """NI DAQ acquisition through Santec SPU (USB-6210 on this system).
+
+    Uses the bundled DLL's asynchronous sampler so cancellation stays pollable.
+    No synthetic timing or monitor values are substituted.
+    """
+
+    def __init__(self, device_name: str) -> None:
+        load_santec_dlls()
+        load_ni_daqmx()
+        from Santec import SPU
+        self._spu = SPU()
+        self._spu.DeviceName = device_name
+
+    def connect(self) -> None:
+        code, _answer = self._spu.Connect("")
+        raise_if_error(code, f"SPU connect {self._spu.DeviceName} (check NI-DAQmx and NI MAX)")
+
+    def configure(self, start, stop, speed, actual_step, averaging_ms) -> None:
+        self._spu.AveragingTime = averaging_ms
+        # This method returns void in the bundled DLL, not an error code.
+        self._spu.Set_Sampling_Parameter(start, stop, speed, actual_step)
+
+    def start_sampling(self) -> None:
+        raise_if_error(self._spu.Sampling_Start(True), "SPU Sampling_Start")
+
+    def wait_for_completion(self, timeout_s, cancel_event=None) -> None:
+        deadline = time.monotonic() + timeout_s
+        while self._spu.IsSampling:
+            check_cancelled(cancel_event)
+            if time.monotonic() >= deadline:
+                raise TimeoutError("NI DAQ sampling timed out; check Dev1 and trigger/monitor wiring")
+            if cancel_event is not None:
+                cancel_event.wait(.05)
+            else:
+                time.sleep(.05)
+        check_cancelled(cancel_event)
+        raise_if_error(self._spu.Logging_Errorcode, "SPU sampling")
+
+    def get_sampling_raw_data(self) -> tuple[list[float], list[float]]:
+        code, trigger, monitor = self._spu.Get_Sampling_Rawdata(None, None)
+        raise_if_error(code, "SPU Get_Sampling_Rawdata (check trigger count and DAQ wiring)")
+        return list(trigger), list(monitor)
+
+    def stop_sampling(self) -> None:
+        raise_if_error(self._spu.Sampling_Stop(), "SPU Sampling_Stop")
+        # Wait for the DLL reader to observe its stop flag before disposing tasks.
+        deadline = time.monotonic() + 5
+        while self._spu.IsSampling:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("SPU reader did not stop; restart Windows service before retrying")
+            time.sleep(.05)
+
+    def disconnect(self) -> None:
+        self._spu.DisConnect()
 
 
 class DllStsProcess:
@@ -344,6 +422,12 @@ class DllStsProcess:
             ),
             "STS Set_Rescaling_Setting",
         )
+
+    def set_spu_rescaling(self, averaging_time_ms: float) -> None:
+        from Santec.STSProcess import RescalingMode
+        raise_if_error(self._ilsts.Set_Rescaling_Setting(
+            RescalingMode.Freerun_SPU, averaging_time_ms, True),
+            "STS Set_Rescaling_Setting Freerun_SPU")
 
     def make_data_struct(
         self,

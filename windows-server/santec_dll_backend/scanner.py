@@ -12,7 +12,7 @@ from typing import Any
 
 from santecpro.sweep_rules import validate_sts_sweep_params
 
-from .instruments import DllMpm, DllStsProcess, DllTsl, check_cancelled
+from .instruments import DllMpm, DllSpu, DllStsProcess, DllTsl, check_cancelled
 
 
 @dataclass(frozen=True)
@@ -30,6 +30,7 @@ class STSScanSettings:
     mpm_range: int = 1
     mpm_averaging_time_ms: float = 0.01
     csv_path: str | Path | None = None
+    daq_device: str = ""
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,7 @@ class STSScanResult:
     csv_path: str
     tsl_idn: str
     mpm_idn: str
+    averaging_time_ms: float | None = None
 
 
 def expected_points(start: float, stop: float, step: float) -> int:
@@ -60,6 +62,7 @@ def run_stsprocess_scan(
     mpm: Any | None = None,
     sts: Any | None = None,
     cancel_event=None,
+    spu: Any | None = None,
 ) -> STSScanResult:
     """Run one DLL-backed STSProcess scan and return rescaled target data."""
     validate_sts_sweep_params(
@@ -79,6 +82,8 @@ def run_stsprocess_scan(
     tsl = tsl or DllTsl(settings.tsl_resource)
     mpm = mpm or DllMpm(settings.mpm_resource)
     sts = sts or DllStsProcess()
+    if spu is None and settings.daq_device:
+        spu = DllSpu(settings.daq_device)
 
     powers: list[float] = []
     channel_powers: dict[int, list[float]] = {}
@@ -88,7 +93,8 @@ def run_stsprocess_scan(
     tsl_idn = ""
     mpm_idn = ""
 
-    tsl_connected = mpm_connected = False
+    tsl_connected = mpm_connected = spu_connected = False
+    averaging_ms = settings.mpm_averaging_time_ms
     try:
         tsl.connect()
         tsl_connected = True
@@ -98,6 +104,10 @@ def run_stsprocess_scan(
         mpm.connect()
         mpm_connected = True
         mpm_idn = mpm.idn()
+        if spu is not None:
+            spu.connect()
+            spu_connected = True
+            logging.getLogger(__name__).info("STS auxiliary source: NI DAQ/SPU %s", settings.daq_device)
         tsl.set_power_dbm(settings.power)
         for channel in channels:
             mpm.configure_power_logging(settings.mpm_module, channel, settings.mpm_range)
@@ -121,10 +131,19 @@ def run_stsprocess_scan(
             settings.start_wl,
             settings.stop_wl,
             settings.step,
-            actual_step,
+            0.0 if spu is not None else actual_step,
             settings.speed,
         )
         mpm_expected = mpm.get_logging_data_point()
+        if spu is not None:
+            averaging_ms = mpm.get_averaging_time_ms()
+            if not math.isfinite(averaging_ms) or averaging_ms <= 0:
+                raise RuntimeError("MPM returned invalid averaging time")
+            spu.configure(settings.start_wl, settings.stop_wl, settings.speed,
+                          actual_step, averaging_ms)
+            logging.getLogger(__name__).info(
+                "STS DAQ configured: trigger_step=%s nm, MPM averaging=%s ms, expected_points=%s",
+                actual_step, averaging_ms, mpm_expected)
 
         tsl.set_continuous_oneway_sweep_mode()
         tsl.set_waiting_for_trigger_start_mode()
@@ -133,9 +152,14 @@ def run_stsprocess_scan(
             mpm.start_logging()
             tsl.start_sweep()
             tsl.wait_for_status(3000, "waiting_for_trigger", cancel_event=cancel_event)
+            if spu is not None:
+                spu.start_sampling()
             tsl.soft_trigger()
+            check_cancelled(cancel_event)
             wait_ms = int(abs(settings.stop_wl - settings.start_wl) / settings.speed * 1100)
             tsl.wait_for_status(max(wait_ms, 5000), "standby", cancel_event=cancel_event)
+            if spu is not None:
+                spu.wait_for_completion(timeout_s=10, cancel_event=cancel_event)
             _status, completed_points = mpm.wait_for_log_completion(
                 expected_points=mpm_expected, cancel_event=cancel_event
             )
@@ -149,8 +173,17 @@ def run_stsprocess_scan(
             raise RuntimeError(f"Incomplete MPM acquisition: expected {mpm_expected}, got {completed_points}")
         first_channel = channels[0]
         first_raw_powers = mpm.get_channel_log_data(settings.mpm_module, first_channel)
-        trigger, monitor = _read_auxiliary_data(tsl, mpm, settings, actual_step)
-        sts.set_tsl_monitor_rescaling(settings.mpm_averaging_time_ms)
+        if spu is not None:
+            trigger, monitor = spu.get_sampling_raw_data()
+            logging.getLogger(__name__).info(
+                "STS DAQ read: trigger=%s, monitor=%s, MPM=%s points",
+                len(trigger), len(monitor), completed_points)
+            _validate_values(trigger, "DAQ trigger data")
+            _validate_values(monitor, "DAQ monitor data")
+            sts.set_spu_rescaling(averaging_ms)
+        else:
+            trigger, monitor = _read_auxiliary_data(tsl, mpm, settings, actual_step)
+            sts.set_tsl_monitor_rescaling(averaging_ms)
         wavelengths: list[float] = []
         rescaled_monitor: list[float] = []
         raw_count = len(first_raw_powers)
@@ -202,9 +235,12 @@ def run_stsprocess_scan(
             csv_path=csv_path,
             tsl_idn=tsl_idn,
             mpm_idn=mpm_idn,
+            averaging_time_ms=averaging_ms,
         )
     finally:
         actions = []
+        if spu_connected:
+            actions.extend([spu.stop_sampling, spu.disconnect])
         if mpm_connected:
             actions.append(mpm.disconnect)
         if tsl_connected:
@@ -252,6 +288,7 @@ def _read_auxiliary_data(
         except Exception as fallback_error:
             raise RuntimeError(
                 f"Cannot obtain measured trigger/monitor data; refusing synthetic data. "
+                f"For NI USB-6210 configure SANTEC_DAQ_DEVICE=Dev1 on Windows and restart server. "
                 f"Primary: {primary_error}; fallback: {fallback_error}"
             ) from fallback_error
 

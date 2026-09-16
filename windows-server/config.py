@@ -22,3 +22,6 @@ DLL_DIR = os.getenv(
     "SANTEC_DLL_DIR",
     str(Path(__file__).resolve().parent / "vendor" / "santec_dll"),
 )
+
+# Confirmed laboratory DAQ; set empty only for supported MPM internal-trigger hardware.
+DAQ_DEVICE = os.getenv("SANTEC_DAQ_DEVICE", "Dev1")

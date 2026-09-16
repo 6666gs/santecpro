@@ -6,6 +6,7 @@ import argparse
 import os
 import sys
 import tempfile
+import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,7 @@ os.environ.setdefault("XDG_CACHE_HOME", _CACHE_DIR)
 
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+from matplotlib.widgets import SpanSelector
 from PyQt5.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
@@ -94,6 +96,8 @@ class PlotCanvas(FigureCanvas):
         self.figure = Figure(figsize=(7, 4), tight_layout=True)
         self.axes = self.figure.add_subplot(111)
         super().__init__(self.figure)
+        self._selector = None
+        self._zoom_enabled = False
         self.clear()
 
     def clear(self) -> None:
@@ -102,7 +106,7 @@ class PlotCanvas(FigureCanvas):
         self.axes.set_xlabel("Wavelength (nm)")
         self.axes.set_ylabel("Power (dBm)")
         self.axes.grid(True, alpha=0.3)
-        self.draw_idle()
+        self._reset_view()
 
     def plot_scan(self, result: ScanResult) -> None:
         self.axes.clear()
@@ -119,7 +123,7 @@ class PlotCanvas(FigureCanvas):
         self.axes.grid(True, alpha=0.3)
         self.axes.set_title(f"Range {result.mpm_range}, {len(result.powers)} points")
         self.axes.legend(loc="best")
-        self.draw_idle()
+        self._reset_view()
 
     def plot_loss(self, record: ScanRecord) -> None:
         self.axes.clear()
@@ -130,7 +134,7 @@ class PlotCanvas(FigureCanvas):
         self.axes.set_ylabel("Insertion loss (dB), reference − measurement")
         self.axes.grid(True, alpha=0.3)
         self.axes.legend(loc="best")
-        self.draw_idle()
+        self._reset_view()
 
     def plot_reference(self, reference: ScanResult) -> None:
         self.axes.clear()
@@ -147,11 +151,70 @@ class PlotCanvas(FigureCanvas):
         self.axes.grid(True, alpha=0.3)
         self.axes.set_title(f"Reference, {len(reference.powers)} points")
         self.axes.legend(loc="best")
+        self._reset_view()
+
+
+    def _reset_view(self) -> None:
+        # Axes.clear removes the selector artist; replace its event handlers too.
+        if self._selector is not None:
+            self._selector.disconnect_events()
+        self._full_limits = (self.axes.get_xlim(), self.axes.get_ylim())
+        self._selector = SpanSelector(
+            self.axes, self.zoom_x, "horizontal", button=1, useblit=False,
+            props={"facecolor": "#3b82f6", "alpha": 0.2},
+        )
+        self._selector.set_active(self._zoom_enabled)
+        self.draw_idle()
+
+    def set_x_zoom_enabled(self, enabled: bool) -> None:
+        self._zoom_enabled = enabled
+        self._selector.set_active(enabled)
+        self.setCursor(Qt.CrossCursor if enabled else Qt.ArrowCursor)
+        if not enabled:
+            self._selector.clear()
+
+    def zoom_x(self, left: float, right: float) -> None:
+        if not np.isfinite([left, right]).all():
+            return
+        left, right = sorted((left, right))
+        full_left, full_right = sorted(self._full_limits[0])
+        left, right = max(left, full_left), min(right, full_right)
+        if right <= left:
+            return
+        visible = []
+        for line in self.axes.lines:
+            if not line.get_visible():
+                continue
+            x, y = np.asarray(line.get_xdata()), np.asarray(line.get_ydata())
+            valid = np.isfinite(x) & np.isfinite(y)
+            x, y = x[valid], y[valid]
+            if not len(x):
+                continue
+            if x[0] > x[-1]:
+                x, y = x[::-1], y[::-1]
+            lo, hi = max(left, x[0]), min(right, x[-1])
+            if hi < lo:
+                continue
+            visible.extend(y[(x >= lo) & (x <= hi)])
+            # Include line values at the drag boundaries even between samples.
+            visible.extend(np.interp([lo, hi], x, y))
+        if not visible:
+            return
+        ymin, ymax = min(visible), max(visible)
+        pad = max((ymax - ymin) * .05, .001)
+        self.axes.set_xlim(left, right)
+        self.axes.set_ylim(ymin - pad, ymax + pad)
+        self.draw_idle()
+
+    def show_all(self) -> None:
+        self.axes.set_xlim(*self._full_limits[0])
+        self.axes.set_ylim(*self._full_limits[1])
+        self._selector.clear()
         self.draw_idle()
 
 
 class AlignmentDialog(QDialog):
-    """Fixed-power MPM readout for grating-coupler alignment."""
+    """Editable fixed-wavelength output with automatic MPM readout range."""
 
     def __init__(
         self,
@@ -161,23 +224,45 @@ class AlignmentDialog(QDialog):
         mpm_channels: tuple[int, ...],
         mpm_range: int,
         parent: QWidget | None = None,
+        *, wavelength: float = 1550.0,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("对光监视")
-        self.resize(520, 260)
+        self.resize(580, 300)
+        self.setModal(True)
+        self._thread = None
+        self._monitoring = False
+        self._closing = False
+        self._apply_pending = False
+        self._last_read_at = None
+        self._refresh_ms = 100
         self._controller = controller
-        self._power = power
         self._module = mpm_module
         self._channels = mpm_channels
-        self._range = mpm_range
         self._labels: dict[int, QLabel] = {}
         self._timer = QTimer(self)
-        self._timer.setInterval(700)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(self._refresh_ms)
         self._timer.timeout.connect(self._poll)
 
         layout = QVBoxLayout(self)
-        top = QLabel(f"Power {power:.2f} dBm, Module {mpm_module}, Range {mpm_range}")
-        layout.addWidget(top)
+        form = QFormLayout()
+        self.wavelength_spin = QDoubleSpinBox()
+        self.wavelength_spin.setRange(1000, 2000)
+        self.wavelength_spin.setDecimals(4)
+        self.wavelength_spin.setSuffix(" nm")
+        self.wavelength_spin.setValue(wavelength)
+        self.power_spin = QDoubleSpinBox()
+        self.power_spin.setRange(-30, 20)
+        self.power_spin.setDecimals(2)
+        self.power_spin.setSuffix(" dBm")
+        self.power_spin.setValue(power)
+        form.addRow("激光波长", self.wavelength_spin)
+        form.addRow("出射功率", self.power_spin)
+        layout.addLayout(form)
+        layout.addWidget(QLabel(f"Module {mpm_module + 1} · MPM 自动量程；修改后点击应用"))
+        self.state_label = QLabel("尚未开始；停止监视和关闭窗口均保持激光开启")
+        layout.addWidget(self.state_label)
         row = QHBoxLayout()
         for channel in mpm_channels:
             label = QLabel(f"CH{channel}\n-- dBm")
@@ -191,7 +276,7 @@ class AlignmentDialog(QDialog):
             row.addWidget(label)
         layout.addLayout(row)
         buttons = QHBoxLayout()
-        self.start_btn = QPushButton("开始监视")
+        self.start_btn = QPushButton("应用并开始监视")
         self.stop_btn = QPushButton("停止")
         self.close_btn = QPushButton("关闭")
         self.start_btn.clicked.connect(self._start)
@@ -203,28 +288,85 @@ class AlignmentDialog(QDialog):
         layout.addLayout(buttons)
 
     def _start(self) -> None:
-        try:
-            powers = self._controller.start_alignment(
-                self._power,
-                self._module,
-                self._channels,
-                self._range,
-            )
-            self._set_powers(powers)
-            self._timer.start()
-        except Exception as exc:
-            QMessageBox.critical(self, "对光启动失败", str(exc))
+        if self._thread is not None:
+            self._apply_pending = True
+            self.state_label.setText("当前读取结束后应用新参数…")
+            return
+        self._apply_pending = False
+        self._last_read_at = None
+        self._timer.stop()
+        self._monitoring = True
+        power, wavelength = self.power_spin.value(), self.wavelength_spin.value()
+        for label in self._labels.values():
+            label.setText("设置中…")
+        self.state_label.setText(f"正在应用 {wavelength:.4f} nm / {power:.2f} dBm")
+        self._launch(lambda: self._controller.start_alignment(
+            power, self._module, self._channels, wavelength=wavelength))
+
+    def _launch(self, task) -> None:
+        self._request_started = time.monotonic()
+        self._thread = QThread(self)
+        self._worker = TaskWorker("alignment", task)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.finished.connect(self._received)
+        self._worker.failed.connect(self._failed)
+        self._worker.finished.connect(self._thread.quit)
+        self._worker.failed.connect(self._thread.quit)
+        self._worker.finished.connect(self._worker.deleteLater)
+        self._worker.failed.connect(self._worker.deleteLater)
+        self._thread.finished.connect(self._thread.deleteLater)
+        self._thread.finished.connect(self._finished)
+        self._thread.start()
+
+    def _received(self, result) -> None:
+        self._set_powers(result.value)
+        now = time.monotonic()
+        rate = ""
+        if self._last_read_at is not None:
+            interval = now - self._last_read_at
+            rate = f" · 实际 {1 / max(interval, .001):.1f} 次/秒"
+        self._last_read_at = now
+        if self._monitoring:
+            self.state_label.setText("监视中 · 自动量程" + rate + "；修改后点击应用")
+
+    def _failed(self, trace: str) -> None:
+        self._stop()
+        self.state_label.setText("监视失败：" + trace.splitlines()[-1])
+        for label in self._labels.values():
+            label.setText("读取失败")
+
+    def _finished(self) -> None:
+        self._thread = None
+        self._worker = None
+        self.start_btn.setEnabled(True)
+        if self._closing:
+            self.close()
+        elif self._apply_pending:
+            self._start()
+        elif self._monitoring:
+            elapsed_ms = (time.monotonic() - self._request_started) * 1000
+            self._timer.start(max(1, int(self._refresh_ms - elapsed_ms)))
 
     def _stop(self) -> None:
+        self._monitoring = False
+        self._apply_pending = False
         self._timer.stop()
+        self.state_label.setText("已停止监视；激光保持当前设置")
 
     def _poll(self) -> None:
-        try:
-            powers = self._controller.read_alignment_powers(self._module, self._channels)
-            self._set_powers(powers)
-        except Exception as exc:
+        if self._thread is None and self._monitoring:
             self._timer.stop()
-            QMessageBox.critical(self, "读取失败", str(exc))
+            self._launch(lambda: self._controller.read_alignment_powers(self._module, self._channels))
+
+    def reject(self) -> None:
+        self._stop()
+        if self._thread is not None:
+            self._closing = True
+            self.start_btn.setEnabled(False)
+            self.state_label.setText("等待当前仪器请求结束后关闭…")
+            return
+        super().reject()
 
     def _set_powers(self, powers: dict[int, float]) -> None:
         for channel, label in self._labels.items():
@@ -233,7 +375,13 @@ class AlignmentDialog(QDialog):
             label.setText(f"CH{channel}\n{text} dBm")
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
-        self._timer.stop()
+        self._stop()
+        if self._thread is not None:
+            self._closing = True
+            self.start_btn.setEnabled(False)
+            self.state_label.setText("等待当前仪器请求结束后关闭…")
+            event.ignore()
+            return
         super().closeEvent(event)
 
 
@@ -383,6 +531,8 @@ class ScanMainWindow(ScriptUiMixin, QMainWindow):
         self.save_reference_btn = self._action(self.reference_menu, "保存 Reference Raw…", self._save_reference)
         self.reference_menu.addSeparator()
         self.clear_reference_btn = self._action(self.reference_menu, "清除当前 Reference", self._clear_reference)
+        self.reference_menu.addSeparator()
+        self._action(self.reference_menu, "清理已保存历史（保留当前结果和 Reference）", self._clear_saved_history)
         self.instrument_menu = QMenu(self)
         self.laser_on_btn = self._action(self.instrument_menu, "开启激光 / 等待预热", self._start_laser)
         self.laser_off_btn = self._action(self.instrument_menu, "手动关闭激光", lambda: self._run_task("laser_off", self._controller.laser_off))
@@ -455,6 +605,15 @@ class ScanMainWindow(ScriptUiMixin, QMainWindow):
         self.plot_canvas = PlotCanvas()
         self.plot_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.plot_canvas.setMinimumSize(300, 200)
+        self.x_zoom_button = QPushButton("X 轴缩放")
+        self.x_zoom_button.setCheckable(True)
+        self.x_zoom_button.setToolTip("启用后在图内横向拖选波长区间，纵轴自动适配；可连续放大")
+        self.x_zoom_button.toggled.connect(self.plot_canvas.set_x_zoom_enabled)
+        self.plot_reset_button = QPushButton("显示全部")
+        self.plot_reset_button.setToolTip("恢复完整曲线范围")
+        self.plot_reset_button.clicked.connect(self.plot_canvas.show_all)
+        row.addWidget(self.x_zoom_button)
+        row.addWidget(self.plot_reset_button)
         layout.addWidget(self.plot_canvas, 1)
         layout.addWidget(self.reference_label)
         return panel
@@ -585,6 +744,7 @@ class ScanMainWindow(ScriptUiMixin, QMainWindow):
             channels,
             int(self.range_combo.currentData()),
             self,
+            wavelength=self.start_spin.value(),
         )
         dialog.show()
 
@@ -615,6 +775,8 @@ class ScanMainWindow(ScriptUiMixin, QMainWindow):
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "保存失败", str(exc))
             return
+        record.saved = True
+        self._trim_history()
         self._log(f"Saved {kind}: {target}")
 
     def _save_reference(self) -> None:
@@ -624,6 +786,34 @@ class ScanMainWindow(ScriptUiMixin, QMainWindow):
         path, _ = QFileDialog.getSaveFileName(self, "保存 Reference Raw", "reference_raw.csv", "CSV Files (*.csv)")
         if path:
             self._export_record(self._session.records[self._session.reference_index], path, "raw")
+
+    def _clear_saved_history(self) -> None:
+        self._trim_history(clear=True)
+
+    def _trim_history(self, *, clear: bool = False) -> None:
+        selected = self._last_record
+        labels = {record.sequence: self.history_combo.itemText(i)
+                  for i, record in enumerate(self._session.records)}
+        removed = self._session.trim_saved(max_records=0 if clear else 20,
+                                          max_bytes=0 if clear else 256 * 1024**2,
+                                          keep=selected)
+        if removed:
+            self.history_combo.blockSignals(True)
+            self.history_combo.clear()
+            for record in self._session.records:
+                self.history_combo.addItem(labels[record.sequence])
+            index = next((i for i, record in enumerate(self._session.records) if record is selected), -1)
+            self.history_combo.setCurrentIndex(index)
+            self.history_combo.blockSignals(False)
+            self._refresh_record_controls()
+            self._log(f"已释放 {removed} 条已保存历史的内存；磁盘文件不受影响")
+        size = self._session.array_bytes / 1024**2
+        self.history_combo.setToolTip(
+            f"内存历史：{len(self._session.records)} 条，数组约 {size:.1f} MiB。"
+            "超过 20 条或 256 MiB 时清理最早已保存记录；保留当前结果、最新结果、Reference 和未保存记录。"
+            "删除磁盘 CSV 不会同步删除内存历史。")
+        if len(self._session.records) > 20 or size > 256:
+            self._log("历史超过缓存目标：保留了未保存数据 / 当前结果 / Reference，请及时保存并清理。")
 
     def _select_history(self, index: int) -> None:
         if index < 0 or index >= len(self._session.records):
@@ -643,7 +833,7 @@ class ScanMainWindow(ScriptUiMixin, QMainWindow):
         if self._session.reference_index is None:
             self.reference_label.setText("未设置 reference：请先扫描线路")
         else:
-            self.reference_label.setText(f"当前 Reference：扫描 #{self._session.reference_index + 1}（只保存 Raw）")
+            self.reference_label.setText(f"当前 Reference：扫描 #{self._session.records[self._session.reference_index].sequence}（只保存 Raw）")
 
     def _plot_selected_record(self, *args) -> None:
         record = self._last_record
@@ -655,7 +845,7 @@ class ScanMainWindow(ScriptUiMixin, QMainWindow):
             self.plot_canvas.plot_scan(record.raw)
         state = (f"Raw + Loss，基于 Reference #{record.reference_index + 1}"
                  if record.loss else f"Raw；{record.loss_error}")
-        self.status_label.setText(f"扫描 #{self.history_combo.currentIndex() + 1}：{len(record.raw.wavelengths)} 点；{state}")
+        self.status_label.setText(f"扫描 #{record.sequence}：{len(record.raw.wavelengths)} 点；{state}")
 
     def _run_task(self, label: str, task: Callable[[], object | None]) -> None:
         if self._preview:
@@ -741,13 +931,14 @@ class ScanMainWindow(ScriptUiMixin, QMainWindow):
             raw.scan_params.setdefault("mpm_idn", self._controller._mpm_idn)
             record = self._session.add(raw, is_reference=result.label == "reference_scan")
             index = len(self._session.records) - 1
-            self.history_combo.addItem(f"#{index + 1} {'Reference' if record.is_reference else '测量'} {raw.timestamp}")
+            self.history_combo.addItem(f"#{record.sequence} {'Reference' if record.is_reference else '测量'} {raw.timestamp}")
             self.history_combo.setCurrentIndex(index)
             self._select_history(index)
             if record.loss_error and not record.is_reference:
                 self._log(record.loss_error)
             if self.save_check.isChecked():
                 self._save_result(record)
+            self._trim_history()
 
     def _task_failed(self, trace: str) -> None:
         if self._script_job is not None:
@@ -802,10 +993,11 @@ class ScanMainWindow(ScriptUiMixin, QMainWindow):
             QMessageBox.warning(self, "无数据", "请先扫描线路，再设置 reference。")
             return
         self._session.set_reference(index)
-        self.history_combo.setItemText(index, f"#{index + 1} Reference {self._last_record.raw.timestamp}")
+        record = self._session.records[index]
+        self.history_combo.setItemText(index, f"#{record.sequence} Reference {self._last_record.raw.timestamp}")
         self._refresh_record_controls()
         self._plot_selected_record()
-        self._log(f"Reference set from scan #{index + 1}; future scans retain raw and loss")
+        self._log(f"Reference set from scan #{record.sequence}; future scans retain raw and loss")
 
     def _clear_reference(self) -> None:
         self._session.clear_reference()

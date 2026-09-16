@@ -324,15 +324,18 @@ class RemoteScanner:
         power: float,
         mpm_module: int = 0,
         mpm_channels: list[int] | tuple[int, ...] = (1,),
-        mpm_range: int = 1,
+        mpm_range: int | None = None,
+        *, wavelength: float = 1550.0,
     ) -> dict[int, float]:
         """Set fixed laser output and read selected channel powers."""
         data = self._post("/api/dll/alignment/start", {
             "power": power,
             "mpm_module": mpm_module,
             "mpm_channels": list(mpm_channels),
-            "mpm_range": mpm_range,
+            "wavelength": wavelength,
         })
+        if data.get("range_mode") != "auto" or data.get("wavelength") != wavelength:
+            raise RuntimeError("请更新 Windows 服务：当前服务未确认对光波长与自动量程设置")
         return {int(ch): float(power) for ch, power in data.get("powers", {}).items()}
 
     def read_alignment_powers(

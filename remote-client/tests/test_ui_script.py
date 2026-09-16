@@ -147,3 +147,36 @@ def test_pause_while_scanning_takes_effect_after_save(gui):
     assert w._script_paused
     assert w._controller.run_single_scan.call_count == 1
     assert list(w._script_dir.glob('*.csv'))
+
+
+def test_long_script_releases_old_arrays_but_keeps_manifest(gui):
+    import weakref
+    app, w = gui
+    # Seed an obsolete saved scan and a reference whose sequence differs from its index.
+    obsolete = w._session.add(w._controller.run_single_scan.return_value)
+    obsolete.saved = True
+    ref = w._session.add(w._controller.run_single_scan.return_value, is_reference=True)
+    ref.saved = True
+    for record in w._session.records:
+        w.history_combo.addItem(f'#{record.sequence} test')
+    old_array = weakref.ref(obsolete.raw.wavelengths)
+    del obsolete
+    text = w.script_editor.toPlainText().split('scan wide')[0]
+    w.script_editor.setPlainText(text + '\n'.join(
+        f'scan pass{i} 1500 1630 step=1pm speed=20' for i in range(24)))
+    w._start_script()
+    pump(app, lambda: w._script_job is None and w._thread is None, timeout=15)
+    assert len(w._session.records) == w.history_combo.count() == 20
+    assert old_array() is None
+    assert w._session.reference is ref.raw
+    assert w._session.reference_index == 0
+    assert w.history_combo.itemText(0).startswith('#2 ')
+    assert '#2' in w.reference_label.text()
+    assert w._last_record.sequence == 26
+    assert all(result.record is None for result in w._script_results)
+    manifest = json.loads((w._script_dir / 'manifest.json').read_text())
+    assert len(manifest['segments']) == 24
+    assert all(s['reference_index'] == 1 and s['loss_available'] for s in manifest['segments'])
+    w._clear_saved_history()
+    assert len(w._session.records) == w.history_combo.count() == 2
+    assert len(list(w._script_dir.glob('*.csv'))) == 24

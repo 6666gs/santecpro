@@ -10,8 +10,8 @@ Grammar (one directive per line; ``#`` starts a full-line comment)::
     device "device name"
     output "~/Measurements"
     wait 5s                              # after the preceding scan
-    set <key>=<value> ...                 # defaults: power range channels averaging
-    scan <label> <start> <stop> step=<v>{pm|nm} speed=<v> [power= range= channels= averaging= dir=]
+    set <key>=<value> ...                 # defaults: power range channels
+    scan <label> <start> <stop> step=<v>{pm|nm} speed=<v> [power= range= channels= dir=]
 
 ``dir`` is one of forward (default) / reverse / both. ``reverse`` swaps
 start/stop so the laser physically sweeps down; ``both`` expands to a forward

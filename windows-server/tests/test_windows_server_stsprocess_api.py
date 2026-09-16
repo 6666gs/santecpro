@@ -41,14 +41,17 @@ def test_sts_scan_result_to_dict_contains_rescaled_and_raw_metadata():
         csv_path = r"E:\code_pro\windows_server\scan_jobs\scan.csv"
         tsl_idn = "TSL"
         mpm_idn = "MPM"
+        averaging_time_ms = 0.02
 
     data = sts_scan_result_to_dict(Result(), {
+        "mpm_averaging_time_ms": 0.01,
         "start_wl": 1540.0,
         "stop_wl": 1540.0001,
         "step": 0.0001,
         "speed": 1.0,
     })
 
+    assert data["scan_params"]["mpm_averaging_time_ms"] == 0.02
     assert data["wavelengths"] == [1540.0, 1540.0001]
     assert data["channel_powers"] == {"1": [-10.0, -10.1], "2": [-20.0, -20.1]}
     assert data["raw_points"] == 3

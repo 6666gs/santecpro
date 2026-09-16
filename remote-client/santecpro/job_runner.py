@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -30,6 +30,17 @@ class SegmentResult:
     error: str
     duration_s: float
     record: ScanRecord | None = None
+    record_info: dict = field(default_factory=dict)
+
+
+def record_info(record: ScanRecord | None) -> dict:
+    return {
+        "is_reference": bool(record and record.is_reference),
+        "reference_index": record.reference_index if record else None,
+        "loss_available": bool(record and record.loss),
+        "loss_error": record.loss_error if record else "",
+        "averaging_ms": record.raw.scan_params.get("mpm_averaging_time_ms") if record else None,
+    }
 
 
 def csv_filename(job: JobSpec, seg: Segment, index: int, kind: str) -> str:
@@ -150,17 +161,13 @@ def _write_manifest(path: Path, job: JobSpec, timestamp: str, results: list[Segm
             "power_dbm": seg.power,
             "mpm_range": seg.mpm_range,
             "channels": list(seg.mpm_channels),
-            "averaging_ms": seg.mpm_averaging_time_ms,
             "wait_after_s": seg.wait_after_s,
             "csv": Path(res.csv_path).name if res.csv_path else None,
             "points": res.points,
             "ok": res.ok,
             "error": res.error,
             "duration_s": round(res.duration_s, 3),
-            "is_reference": bool(res.record and res.record.is_reference),
-            "reference_index": res.record.reference_index if res.record else None,
-            "loss_available": bool(res.record and res.record.loss),
-            "loss_error": res.record.loss_error if res.record else "",
+            **(record_info(res.record) if res.record else (res.record_info or record_info(None))),
             "loss_convention": "reference_dbm - measurement_dbm",
         })
     manifest = {"job": job.name, "device": job.device, "timestamp": timestamp, "segments": entries}

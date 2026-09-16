@@ -70,3 +70,38 @@ def test_set_reference_from_measured_history_does_not_rewrite_old_losses():
     session.clear_reference()
     np.testing.assert_allclose(measured.loss[1], 10)
     assert session.records[0].is_reference
+
+
+def test_trim_saved_preserves_reference_unsaved_and_stable_provenance():
+    import weakref
+    session = ScanSession()
+    obsolete = session.add(scan())
+    obsolete.saved = True
+    released = weakref.ref(obsolete.raw.wavelengths)
+    del obsolete
+    ref = session.add(scan(-1), is_reference=True)
+    ref.saved = True
+    unsaved = session.add(scan(-11))
+    recent = session.add(scan(-12))
+    recent.saved = True
+    assert session.trim_saved(max_records=2) == 1
+    assert released() is None
+    assert [r.sequence for r in session.records] == [2, 3, 4]
+    assert session.reference_index == 0
+    assert session.reference is ref.raw
+    assert unsaved.reference_index == recent.reference_index == 1
+    next_record = session.add(scan(-13))
+    assert next_record.sequence == 5 and next_record.reference_index == 1
+    np.testing.assert_allclose(next_record.loss[1], 12)
+
+
+def test_trim_saved_byte_budget_and_selected_record():
+    session = ScanSession()
+    for _ in range(6):
+        session.add(scan()).saved = True
+    selected = session.records[1]
+    newest = session.records[-1]
+    size = newest.array_bytes
+    assert session.trim_saved(max_records=100, max_bytes=2 * size, keep=selected) == 4
+    assert session.records[0] is selected and session.records[1] is newest
+    assert session.array_bytes == 2 * size

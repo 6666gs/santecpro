@@ -1,3 +1,5 @@
+> 当前官方依赖更新请先阅读 [OFFICIAL_SDK_UPDATE.md](OFFICIAL_SDK_UPDATE.md)。已提供匹配的本地 x64 NI-DAQmx；下方关于缺少 GAC 的历史排查说明不代表仍须先补装 .NET 组件。
+
 # windows-server — Santec 扫谱服务端
 
 **部署在 Windows 电脑上**,直连 TSL-550 激光器和 MPM-210 功率计,加载 Santec DLL 执行扫描,对外提供 HTTP 接口。控制端(Mac/其他电脑)通过网络调用本服务。
@@ -100,3 +102,39 @@ windows-server/
 pip install pytest
 pytest
 ```
+
+### NI USB-6210 / Dev1 采集修复
+
+当前实验系统使用 TSL-550 + MPM-210 + NI USB-6210（NI MAX 名称 `Dev1`）。服务端默认 `DAQ_DEVICE="Dev1"`，通过官方 `Santec.SPU` 获取实际触发/Monitor 数据；Mac 无需增加 DAQ 配置。Windows 需安装 NI-DAQmx（含 .NET Framework 支持），并保留官方软件正常扫描时的接线。
+
+旧版本错误 `Get_216_Triggerdata ... -20` 来自 DLL 对模块固件的限制；重试同类接口不能代替 DAQ。新路径：连接 SPU → MPM 自由采集配置（triggerstep=0）→ 读取实际平均时间 → 启动 DAQ → TSL soft trigger → 等待采集 → 读取 DAQ → `Freerun_SPU` 重采样。禁止用合成触发或 Monitor 数据替代失败采集。
+
+更新整个 Windows 服务端目录后，退出旧 `server.py`，在新目录启动：
+
+```powershell
+$env:SANTEC_DAQ_DEVICE = "Dev1"
+python diagnostics/diagnose_daq.py
+python server.py
+```
+
+诊断只枚举 DAQ 和 DLL 方法，不开光、不扫描。先用 1545–1546 nm、1 pm、1 nm/s 扫描 Reference 验收，再进行宽谱扫描。DAQ 采集失败时不导出结果；取消、异常及正常结束均释放采集任务，不关闭激光。若其他硬件确实支持 MPM 内置触发读取，可在 `config.py` 将 `DAQ_DEVICE` 改为空字符串来禁用 SPU 路径，不应对本套 Dev1 系统这样设置。
+
+依据：[Santec 官方 DAQ 接口示例](https://github.com/santec-corporation/Python-IL-STS/blob/main/src/santec/daq_device_class.py)、[官方 STS 顺序与 Freerun_SPU](https://github.com/santec-corporation/Python-IL-STS/blob/main/src/santec/sts_process.py)。同时核对了项目内 DLL：`Set_Sampling_Parameter` 返回 void；`Sampling_Start(True)` 启动异步采集，支持轮询 `IsSampling` 与 `Logging_Errorcode`。本地模拟测试不代替 Dev1 实机验收。
+
+### DAQmx `BadImageFormatException`（DLL 位数冲突）
+
+项目原有 `vendor/santec_dll/NationalInstruments.DAQmx.dll` 是 x86 混合程序集，而 `Santec.Instrument.dll` 和 `STSProcess.dll` 是 x64，不能一起加载。**保留 64 位 Python**。新加载器不再按路径强制加载这份 NI DLL，而是按 Santec SDK 引用的完整程序集标识交给 Windows .NET Framework 及 NI 安装程序注册的 publisher policy 解析，再验证实际加载的是 x64。
+
+`python diagnostics/diagnose_daq.py` 会先打印 Python 位数、项目 DLL 架构、系统 GAC 中 NI DAQmx 的路径与版本，再尝试枚举 Dev1。如果找不到兼容程序集，需安装/修复 NI-DAQmx 的 **.NET Framework 支持**及版本策略；能在 NI MAX 看见 Dev1，并不证明 .NET 支持已安装。不要从任意目录复制一个同名 DLL，也不要盲目启用程序集绑定日志注册表项。请保留诊断的完整输出，用于核对具体版本。
+
+高级覆盖 `SANTEC_NI_DAQMX_DLL` 仅接受 x64、且完整程序集标识与 SDK 引用一致的 DLL；不同版本需要 NI 安装程序的兼容策略，不自动强制改绑。依据：[NI .NET 支持说明](https://knowledge.ni.com/KnowledgeArticleDetails?id=kA00Z0000019MOCSA2)。
+
+若输出中的 `Installed NI .NET assemblies` 为空，且随后 pythonnet 又从 vendor 加载 x86 DLL，说明旧加载器仍允许自动回退。新版在缺少已注册 x64 程序集时提前停止；加载 Santec SDK 前会将 vendor 内已知的 x86 DAQmx DLL 重命名为 `.x86-disabled`（保留原文件，不覆盖已有备份），阻止 resolver 回退。
+
+先运行 `python diagnostics/diagnose_ni_install.py`：这是标准库独立脚本，不加载 clr 或任何 DLL、不操作设备、不修改文件。它检查 GAC、National Instruments 安装目录和 IVI 目录；GAC 为空不等于整台电脑没有 .NET 程序集。根据输出再选择安装 NI-DAQmx 的 .NET Framework 支持，或核对已有 x64 程序集的完整版本标识。看到 NI MAX 的 Dev1 仅说明设备驱动一侧可用。
+
+### 对光监视：波长、功率与自动量程
+
+`POST /api/dll/alignment/start` 接受 `wavelength`（nm，省略为1550）、`power`（dBm）、`mpm_module` 和 `mpm_channels`。设置 TSL 波长/功率及 MPM 测量波长，调用官方 `Set_READ_Range_Mode(Auto)`，然后返回单点功率；响应含 `range_mode: auto` 和已提交的 `wavelength`、`power`。这些是成功提交的设置值，不是独立光功率实测值。旧 `mpm_range` 参数在此接口忽略，扫描路径仍显式设置 Manual 及固定 Range。接口不执行 LD/快门切换。
+
+对光刷新优化：`alignment_cache.py` 在仪器锁保护下复用 MPM 连接，读数失败、地址改变或进入其他仪器操作时释放。后台每秒检查一次，闲置达到 5 秒后释放通信连接（不更改 LD/快门）。每次 `/api/dll/mpm/powers` 仍读取真实仪器，不返回缓存功率值。需随 `server.py` 一起部署该文件。

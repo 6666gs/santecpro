@@ -121,13 +121,14 @@ class ScanUiController:
         power: float,
         mpm_module: int,
         mpm_channels: tuple[int, ...],
-        mpm_range: int,
+        mpm_range: int | None = None,
+        *, wavelength: float = 1550.0,
     ) -> dict[int, float]:
         return self._require_scanner().start_alignment(
             power=power,
             mpm_module=mpm_module,
             mpm_channels=mpm_channels,
-            mpm_range=mpm_range,
+            wavelength=wavelength,
         )
 
     def read_alignment_powers(

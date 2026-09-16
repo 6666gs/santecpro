@@ -31,7 +31,8 @@ def test_controls_fit_without_scrollbars(window, width, height):
     for control in [w.start_spin, w.stop_spin, w.step_combo, w.speed_combo,
                     w.power_spin, w.channel_button, w.scan_btn, w.cancel_btn,
                     w.reference_scan_btn, w.save_btn, w.save_check, w.export_combo,
-                    w.view_combo, w.history_combo, w.fullscreen_button, w.settings_button]:
+                    w.view_combo, w.history_combo, w.fullscreen_button, w.settings_button,
+                    w.x_zoom_button, w.plot_reset_button]:
         assert control.isVisible()
         rect = control.rect()
         rect.moveTopLeft(control.mapTo(w.centralWidget(), QPoint(0,0)))

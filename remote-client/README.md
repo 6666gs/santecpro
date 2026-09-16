@@ -74,8 +74,8 @@ job <名字>                          # 可选,命名输出文件夹
 device "器件名字"                    # 可选,自动加入文件名
 output "~/Measurements/santec"       # 可选,Mac 本地保存路径
 wait 5s                             # 放在 scan 后面,保存后等待
-set k=v ...                         # 可选默认:power range channels averaging
-scan <标签> <start> <stop> step=<v>{pm|nm} speed=<v> [power= range= channels= averaging= dir=]
+set k=v ...                         # 可选默认:power range channels
+scan <标签> <start> <stop> step=<v>{pm|nm} speed=<v> [power= range= channels= dir=]
 ```
 - `start stop` 按蓝→红(低→高)写;`dir=forward`(默认)/ `reverse`(真实下扫)/ `both`(先正后反,展开成两段)。
 - `step` 必带单位(`20pm` 或 `0.02nm`);`step`+`speed` 走 `sweep_rules` 校验。
@@ -84,7 +84,7 @@ scan <标签> <start> <stop> step=<v>{pm|nm} speed=<v> [power= range= channels= 
 **示例**([jobs/example.scan](jobs/example.scan)):
 ```text
 job example_device
-set power=0 channels=1 range=1 averaging=0.01
+set power=0 channels=1 range=1
 scan broadband 1500 1600 step=20pm speed=50
 scan resonance 1549 1551 step=1pm speed=10 dir=both
 scan band_c    1530 1565 step=5pm speed=20 dir=reverse channels=1,2
@@ -106,7 +106,7 @@ python run_job.py my_job.scan --outdir ./scan_results --keep-going
 job two_pass
 device "device_001"
 output "~/Measurements/santec"
-set power=0 range=1 channels=1 averaging=0.01
+set power=0 range=1 channels=1
 scan wide 1500 1630 step=1pm speed=20
 wait 5s
 scan fine 1545 1555 step=0.1pm speed=1
@@ -173,3 +173,26 @@ pytest
 - **停止脚本** 会停止后续步骤；正在扫描时同时请求取消本段。已保存文件和已有历史结果保留，激光保持开启。
 - UI 脚本使用当前界面会话中实测的 Reference，导出类型在启动时读取主界面 Raw/Loss 选择，过程中保持固定；没有有效 reference 就没有 Loss。要测 reference，请先用主界面“扫描 Reference”，再运行器件脚本。
 - 脚本运行时锁定仪器操作和手动扫描；默认任一扫描或保存失败就停止，不会悄悄继续下一段。
+
+### GUI 历史缓存与平均时间
+
+- 历史曲线保存在 Mac 内存，与导出的 CSV 独立。删除 CSV 不会同步删除历史；关闭程序后内存历史消失。
+- GUI 超过 **20 条记录或 256 MiB 数组数据**时，自动释放最早已成功导出记录的 Raw/Loss。保留当前 Reference、最新结果、当前查看结果以及所有未保存/保存失败的记录；因此这是缓存目标，不是进程内存硬上限。未保存记录过多时请及时保存，运行日志会提示超额。
+- `Reference` 菜单的“清理已保存历史”可立即释放旧数据；不删除磁盘文件。历史框悬停显示数组占用。被清理的记录不再出现在下拉框，原扫描编号及 Loss 的 Reference 编号保持不变。磁盘只保留你选择导出的 Raw 或 Loss，缓存清理后不能再从内存补导另一种。
+- GUI 脚本只额外保留轻量执行摘要，已清理数组不会被脚本列表继续持有。命令行 `run_job` 的返回值仍保留各段记录，供 Python 调用者处理；上述自动清理策略仅用于 GUI。
+- **脚本不需要 `averaging=`**，已从内置示例中移除。当前 NI USB-6210 / SPU 路径在 MPM 设置扫描采集后读取仪器实际平均时间，并用于 DAQ 和重采样；不是强行设定为 0.01 ms。旧脚本中的字段仍兼容解析，在此路径由仪器实际值覆盖。无 SPU 的旧路径仍保留原兼容行为。
+- 更新 Windows 服务后，扫描响应和 Mac 导出 CSV 的平均时间元数据使用实际值；脚本 manifest 同样记录返回值。旧服务未返回实际值时，manifest 中未知值为 null。
+
+导出的 Raw、Loss 和 Reference Raw 均在第 13 行记录本次扫描的 MPM Range 编号，例如 `Power meter range,,dBm,MPM range,3` 表示 Range 3。编号来自历史扫描结果，不随当前界面选项变化。原 dBm 量程字段仅在已有明确值时填写；Range 编号不当作 dBm。仍保留 14 行元数据及原数据列格式，列名中的 `R1` 仍表示导出曲线序号。此修正只需更新并重启 Mac 客户端；已在内存中的历史可重新导出，已有 CSV 不自动改写。
+
+### 单波长对光监视
+
+在“仪器 → 对光监视…”的小窗口中编辑激光波长（nm）和出射功率（dBm），点击“应用并开始监视”；运行期间可继续编辑并再次应用。窗口初始波长取扫描起点、初始功率取扫描功率，修改只在点击应用时发送。仪器会拒绝超出自身能力的参数。MPM 同步设置测量波长并启用单点 READ 自动量程，无需选扫描 Range；自动量程仍受模块物理测量范围限制。后续扫描会重新设置固定扫描 Range。
+
+窗口以后台线程读数，关闭时等待正在执行的请求结束。打开期间主窗口不能启动扫描，避免同时改变仪器状态。停止和关闭均保持激光开启及最后应用的波长/功率，不重新开光或关光。必须同时更新 Windows 服务；旧服务无法确认自动量程和波长时会明确提示更新。
+
+官方接口依据：[Python-IL-STS 的 set_read_range_mode](https://github.com/santec-corporation/Python-IL-STS/blob/main/src/santec/mpm_instrument_class.py#L404-L417)，使用 `Set_READ_Range_Mode(MPM.READ_Range_Mode.Auto)`。本项目以前在对光时误用了扫描用的 Manual 配置。
+
+对光监视以 **100 ms（目标 10 次/秒）**为刷新周期；读取耗时计入周期，较慢时完成上一请求才发下一次，不并发堆积。状态栏显示实际完成读数的刷新率（包含网络及仪器耗时，并非保证仪器每次都生成独立新样本）。Windows 复用 MPM 连接，正常轮询不再每次 Connect/DisConnect；约 5–6 秒没有读数请求后自动释放连接，开始扫描/其他仪器操作前也先释放，发生读取错误则立即释放。停止/关闭窗口停止发读数请求，服务器短暂保留连接后释放，均不关光。
+
+图窗上方的“X 轴缩放”是开关：启用后在曲线区域按住鼠标左键横向拖选波长范围，纵轴自动适配该范围内全部显示通道，可连续拖选进一步放大。“显示全部”恢复当前曲线的完整范围；切换历史、Raw/Loss 或 Reference 时自动恢复新曲线的完整视图。缩放只改变显示，不修改内存数据或 CSV。两个按钮不影响应用窗口的全屏状态。

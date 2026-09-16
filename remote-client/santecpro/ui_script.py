@@ -7,7 +7,7 @@ from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
                             QTextEdit, QFileDialog, QMessageBox, QCheckBox, QLabel)
 from santecpro.jobscript import parse_job
-from santecpro.job_runner import csv_filename, SegmentResult, _write_manifest
+from santecpro.job_runner import csv_filename, SegmentResult, _write_manifest, record_info
 from santecpro.exporter import save_record_csv
 from santecpro.ui_controller import ScanSettings
 
@@ -28,7 +28,7 @@ class ScriptUiMixin:
         self.script_editor = QTextEdit()
         self.script_editor.setAcceptRichText(False)
         self.script_editor.setPlainText(self._script_path.read_text(encoding='utf-8'))
-        layout.addWidget(QLabel("按脚本逐段扫描并自动保存；导出类型沿用主界面 Raw / Loss 选择。"))
+        layout.addWidget(QLabel("按脚本逐段扫描并自动保存；导出类型沿用主界面 Raw / Loss 选择；NI DAQ 平均时间自动确定。"))
         layout.addWidget(self.script_editor)
         self.script_review_check = QCheckBox('每段结束后手动继续（不限查看时间）')
         layout.addWidget(self.script_review_check)
@@ -121,20 +121,22 @@ class ScriptUiMixin:
         raw.scan_params.setdefault('mpm_idn', self._controller._mpm_idn)
         record = self._session.add(raw)
         index = len(self._session.records) - 1
-        self.history_combo.addItem(f'#{index + 1} {seg.label} {raw.timestamp}')
+        self.history_combo.addItem(f'#{record.sequence} {seg.label} {raw.timestamp}')
         self.history_combo.setCurrentIndex(index)
         self._select_history(index)
         path = self._script_dir / csv_filename(self._script_job, seg, self._script_index + 1, self._script_kind)
         error = ''
         try:
             save_record_csv(record, str(path), self._script_kind)
+            record.saved = True
             self._log(f'Saved {self._script_kind}: {path}')
         except Exception as exc:
             error = str(exc)
             self._script_stopped = True
         self._script_results.append(SegmentResult(seg.label, seg.direction, not error,
             str(path) if not error else '', len(raw.wavelengths), error,
-            time.monotonic() - self._script_started, record))
+            time.monotonic() - self._script_started, record_info=record_info(record)))
+        self._trim_history()
         self._script_remaining = seg.wait_after_s
         self._script_index += 1
         try:
@@ -204,4 +206,4 @@ class ScriptUiMixin:
         self._script_job = None
         self.script_pause_btn.setText('暂停脚本')
         self._set_busy(False)
-        self.status_label.setText(f'脚本{state}；结果保留在历史记录中。输出：{self._script_dir}')
+        self.status_label.setText(f'脚本{state}；最近结果保留在历史缓存中。输出：{self._script_dir}')

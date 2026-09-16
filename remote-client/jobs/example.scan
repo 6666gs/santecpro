@@ -5,7 +5,7 @@
 job example_device
 
 # 全局默认(每段可覆盖)
-set power=0 channels=1 range=1 averaging=0.01
+set power=0 channels=1 range=1
 
 # 1) 宽谱概览:1500 -> 1600 nm,20 pm,50 nm/s
 scan broadband 1500 1600 step=20pm speed=50

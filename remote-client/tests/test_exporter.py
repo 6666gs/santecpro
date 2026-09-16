@@ -203,3 +203,49 @@ def test_mismatched_raw_lengths_rejected_before_overwriting(tmp_path):
     with pytest.raises(ValueError, match='mismatched'):
         save_raw_csv(scan, TSL_IDN, MPM_IDN, path)
     assert path.read_text() == 'existing'
+
+
+@pytest.mark.parametrize('mpm_range', [1, 2, 3, 4, 5])
+def test_raw_loss_and_reference_export_captured_hardware_range(tmp_path, mpm_range):
+    from santecpro.session import ScanSession
+    from santecpro.exporter import save_record_csv
+    session = ScanSession()
+    reference = _make_scan_result()
+    reference.mpm_range = 2
+    ref_record = session.add(reference, is_reference=True)
+    measurement = _make_scan_result()
+    measurement.mpm_range = mpm_range
+    record = session.add(measurement)
+    # Later input/UI changes must not alter the history record's exported setting.
+    measurement.mpm_range = 5
+    for kind in ('raw', 'loss'):
+        path = tmp_path / f'{kind}.csv'
+        save_record_csv(record, path, kind)
+        rows = _read_csv_rows(path)
+        assert rows[12] == ['Power meter range', '', 'dBm', 'MPM range', str(mpm_range)]
+        assert rows[14][0] == 'Wavelength(nm)'
+    path = tmp_path / 'reference.csv'
+    save_record_csv(ref_record, path, 'raw')
+    assert _read_csv_rows(path)[12][-2:] == ['MPM range', '2']
+
+
+def test_range_index_does_not_replace_explicit_dbm_range(tmp_path):
+    scan = _make_scan_result()
+    scan.mpm_range = 3
+    scan.scan_params['power_meter_range_dbm'] = -10
+    path = tmp_path / 'raw.csv'
+    save_raw_csv(scan, TSL_IDN, MPM_IDN, path)
+    assert _read_csv_rows(path)[12] == ['Power meter range', '-10', 'dBm', 'MPM range', '3']
+
+
+def test_instrument_response_terminators_do_not_add_physical_header_lines(tmp_path):
+    scan = _make_scan_result()
+    path = tmp_path / 'raw.csv'
+    save_raw_csv(scan, TSL_IDN + '\r\n', MPM_IDN + '\n', path)
+    lines = path.read_text().splitlines()
+    assert lines[14].startswith('Wavelength(nm),')
+    loaded = np.loadtxt(path, delimiter=',', skiprows=15, usecols=(0, 1, 2))
+    np.testing.assert_allclose(loaded[:, 0], scan.wavelengths)
+    rows = _read_csv_rows(path)
+    assert rows[2][4] == TSL_IDN.split(',')[3].strip()
+    assert rows[3][4] == MPM_IDN.split(',')[3].strip()
