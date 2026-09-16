@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import csv
+from datetime import datetime
+
+import numpy as np
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -39,50 +42,40 @@ def _write_header(writer, tsl_idn: str, mpm_idn: str, params: dict, timestamp: s
     """
     from santecpro import __version__
 
-    # Parse timestamp into date and time parts
-    if "T" in timestamp:
-        date_part, time_part = timestamp.split("T", 1)
-    else:
+    try:
+        stamp = datetime.fromisoformat(timestamp)
+        date_part = f"{stamp.year}/{stamp.month}/{stamp.day}"
+        time_part = stamp.strftime("%H:%M:%S")
+    except ValueError:
         date_part, time_part = timestamp, ""
+    tsl, mpm = _parse_idn(tsl_idn), _parse_idn(mpm_idn)
+    module = int(params.get("mpm_module", 0)) + 1
+    rows = [
+        [date_part, time_part, "", "", ""],
+        ["Software", "santecpro", f"Ver.{__version__}", "", ""],
+        ["TSL", tsl["vendor"], tsl["model"], tsl["serial"], tsl["firmware"], "", "", ""],
+        ["PowerMeter", mpm["vendor"], mpm["model"], mpm["serial"], mpm["firmware"], "", "", ""],
+        [" ", f"Module{module}", params.get("module_model", ""), params.get("module_serial", ""), params.get("module_info", "")],
+        ["PowerMonitor", params.get("power_monitor_idn", ""), "", "", ""],
+        ["Start", f"{params.get('start_wl', 0):.6f}", "nm", "", ""],
+        ["Stop", f"{params.get('stop_wl', 0):.6f}", "nm", "", ""],
+        ["Step", f"{params.get('step', 0):.6f}", "nm", "", ""],
+        ["Speed", f"{params.get('speed', 0):.6f}", "nm/s", "", ""],
+        ["Source power", f"{params.get('power', 0):.6f}", "dBm", "", ""],
+        ["Averaging Time", f"{params['mpm_averaging_time_ms'] / 1000:.6f}" if "mpm_averaging_time_ms" in params else "", "s", "", ""],
+        ["Power meter range", params.get("power_meter_range_dbm", ""), "dBm", "", ""],
+        ["TSL PM- range", params.get("tsl_pm_range", ""), "", "", ""],
+    ]
+    writer.writerows(rows)
 
-    tsl = _parse_idn(tsl_idn)
-    mpm = _parse_idn(mpm_idn)
 
-    start_wl = params.get("start_wl", 0.0)
-    stop_wl = params.get("stop_wl", 0.0)
-    step = params.get("step", 0.0)
-    speed = params.get("speed", 0.0)
-    power = params.get("power", 0.0)
-    sweep_mode = params.get("sweep_mode", "")
-
-    # line 1
-    writer.writerow([date_part, time_part, "", ""])
-    # line 2
-    writer.writerow(["Software", "santecpro", f"Ver.{__version__}", "", ""])
-    # line 3
-    writer.writerow(["TSL", tsl["vendor"], tsl["model"], tsl["serial"], tsl["firmware"], "", "", ""])
-    # line 4
-    writer.writerow(["PowerMeter", mpm["vendor"], mpm["model"], mpm["serial"], mpm["firmware"], "", "", ""])
-    # line 5
-    writer.writerow(["", "Module1", "MPM-211", "", "", ""])
-    # line 6 (blank)
-    writer.writerow([])
-    # line 7
-    writer.writerow(["Start", f"{start_wl:.6f}", "nm", ""])
-    # line 8
-    writer.writerow(["Stop", f"{stop_wl:.6f}", "nm", ""])
-    # line 9
-    writer.writerow(["Step", f"{step:.6f}", "nm", ""])
-    # line 10
-    writer.writerow(["Speed", f"{speed:.6f}", "nm/s", ""])
-    # line 11
-    writer.writerow(["Source power", f"{power:.6f}", "dBm", ""])
-    # line 12
-    writer.writerow(["Averaging Time", "", "s", ""])
-    # line 13
-    writer.writerow(["Power meter range", "", "dBm", ""])
-    # line 14
-    writer.writerow(["Sweep mode", sweep_mode, "", ""])
+def _validate_columns(wavelengths, columns):
+    n = len(wavelengths)
+    if not n or not np.all(np.isfinite(wavelengths)):
+        raise ValueError("Missing or invalid wavelength data")
+    for values in columns:
+        if len(values) != n or not np.all(np.isfinite(values)):
+            raise ValueError("Missing, invalid or mismatched spectral data")
 
 
 def save_raw_csv(
@@ -94,7 +87,7 @@ def save_raw_csv(
     """Save raw scan data to a CSV file.
 
     The file contains a 14-line metadata header followed by data columns:
-    ``Wavelength(nm),Monitor(dBm),M1-Ch1(dBm),,``
+    ``Wavelength(nm),Monitor-R1(dBm),Raw_M1-Ch1-R1(dBm),,``
 
     Args:
         scan: The ``ScanResult`` to export.
@@ -102,16 +95,20 @@ def save_raw_csv(
         mpm_idn: ``*IDN?`` response from the MPM.
         filepath: Destination file path.
     """
+    channels = scan.channels()
+    module = int(scan.scan_params.get("mpm_module", 0)) + 1
+    powers = [scan.powers_for_channel(ch) for ch in channels]
+    _validate_columns(scan.wavelengths, [scan.monitor_powers, *powers])
+    # R1 is the exported range-trace index, not the MPM hardware range setting.
+    headers = ["Wavelength(nm)", "Monitor-R1(dBm)",
+               *[f"Raw_M{module}-Ch{ch}-R1(dBm)" for ch in channels], "", ""]
     with open(filepath, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         _write_header(writer, tsl_idn, mpm_idn, scan.scan_params, scan.timestamp)
-
-        # Data header
-        writer.writerow(["Wavelength(nm)", "Monitor(dBm)", "M1-Ch1(dBm)", "", ""])
-
-        # Data rows
-        for wl, mon, pwr in zip(scan.wavelengths, scan.monitor_powers, scan.powers):
-            writer.writerow([f"{wl:.6f}", f"{mon:.6f}", f"{pwr:.6f}", "", ""])
+        writer.writerow(headers)
+        for i, wl in enumerate(scan.wavelengths):
+            writer.writerow([f"{wl:.5f}", f"{scan.monitor_powers[i]:.5f}",
+                             *[f"{power[i]:.5f}" for power in powers], "", ""])
 
 
 def save_loss_csv(
@@ -131,16 +128,39 @@ def save_loss_csv(
         mpm_idn: ``*IDN?`` response from the MPM.
         filepath: Destination file path.
     """
+    scan = il_measurement.measurement
+    channel = scan.channels()[0]
+    _save_loss_columns(scan, {channel: il_measurement.il}, tsl_idn, mpm_idn, filepath,
+                       wavelengths=il_measurement.wavelengths)
+
+
+def _save_loss_columns(scan, losses, tsl_idn, mpm_idn, filepath, *, wavelengths=None):
+    wavelengths = scan.wavelengths if wavelengths is None else wavelengths
+    channels = sorted(losses)
+    if not channels:
+        raise ValueError("Loss is unavailable; scan and set a reference first")
+    _validate_columns(wavelengths, [losses[ch] for ch in channels])
+    module = int(scan.scan_params.get("mpm_module", 0)) + 1
     with open(filepath, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        # Use the reference scan's params and timestamp for the header
-        params = il_measurement.reference.scan_params
-        timestamp = il_measurement.reference.timestamp
-        _write_header(writer, tsl_idn, mpm_idn, params, timestamp)
+        _write_header(writer, tsl_idn, mpm_idn, scan.scan_params, scan.timestamp)
+        headers = ["Wavelength(nm)", *[f"IL_M{module}_CH{ch}" for ch in channels]]
+        padding = [""] * max(0, 5 - len(headers))
+        writer.writerow(headers + padding)
+        for i, wl in enumerate(wavelengths):
+            writer.writerow([f"{wl:.8f}", *[f"{losses[ch][i]:.8f}" for ch in channels]] + padding)
 
-        # Data header
-        writer.writerow(["Wavelength(nm)", "IL_M1_CH1", "", "", ""])
 
-        # Data rows
-        for wl, il in zip(il_measurement.wavelengths, il_measurement.il):
-            writer.writerow([f"{wl:.6f}", f"{il:.6f}", "", "", ""])
+def save_record_csv(record, filepath: str, kind: str = "raw") -> None:
+    """Export stored data, never recalculate using a newer reference."""
+    scan = record.raw
+    tsl_idn = scan.scan_params.get("tsl_idn", "")
+    mpm_idn = scan.scan_params.get("mpm_idn", "")
+    if kind == "raw":
+        save_raw_csv(scan, tsl_idn, mpm_idn, filepath)
+    elif kind == "loss":
+        if record.is_reference or not record.loss:
+            raise ValueError(record.loss_error or "Reference only supports raw export")
+        _save_loss_columns(scan, record.loss, tsl_idn, mpm_idn, filepath)
+    else:
+        raise ValueError(f"Unknown export kind: {kind}")

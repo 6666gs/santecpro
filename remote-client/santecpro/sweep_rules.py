@@ -46,6 +46,12 @@ def validate_sts_sweep_params(
         step: Sweep step in nm.
         speed: Sweep speed in nm/s.
     """
+    if not all(math.isfinite(value) for value in (start_wl, stop_wl, step, speed)):
+        raise ValueError("Sweep parameters must be finite")
+    if start_wl <= 0 or stop_wl <= 0 or start_wl == stop_wl:
+        raise ValueError("Wavelength endpoints must be positive and different")
+    if abs(stop_wl - start_wl) + _STEP_TOL_NM < step:
+        raise ValueError("Sweep span must be at least one step")
     step_pm = _canonical_step_pm(step)
     allowed_speeds = get_allowed_speeds_nm_s(step)
     if not any(math.isclose(speed, allowed, rel_tol=0.0, abs_tol=_SPEED_TOL_NM_S) for allowed in allowed_speeds):

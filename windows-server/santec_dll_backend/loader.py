@@ -21,7 +21,7 @@ def load_santec_dlls(dll_dir: str | os.PathLike[str] | None = None) -> Path:
     if platform.system() != "Windows":
         raise RuntimeError("Santec DLL backend can only run on Windows.")
 
-    resolved = Path(dll_dir or DEFAULT_DLL_DIR).resolve()
+    resolved = Path(dll_dir or os.getenv("SANTEC_DLL_DIR") or DEFAULT_DLL_DIR).resolve()
     instrument = resolved / "Santec.Instrument.dll"
     sts_process = resolved / "STSProcess.dll"
     missing = [str(p) for p in (instrument, sts_process) if not p.exists()]

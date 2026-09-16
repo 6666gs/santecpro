@@ -17,3 +17,7 @@ class InstrumentConnectionError(SantecError):
 class InstrumentOperationError(SantecError):
     """Raised when an instrument operation fails."""
     pass
+
+
+class ScanCancelled(RuntimeError):
+    """A user cancelled the scan; batch runners must not continue."""

@@ -45,7 +45,7 @@
 
 两个文件夹各自自包含。少量两端都要的小模块(`exceptions.py`、`sweep_rules.py`)在两侧各存一份;以 `remote-client/santecpro/` 为源,用根目录 [`sync_shared.py`](../sync_shared.py) 同步(`--check` 校验一致)。
 
-`exporter.py` 两侧也各有一份,仅类型注解导入路径不同(客户端 `results`,服务端 `scanner`),运行期无差异。
+`exporter.py` 两侧也各有一份,仅类型注解导入路径不同(客户端 `results`,服务端 `scanner`),客户端版本现已按官方样本列结构扩展为多通道 Raw/Loss 导出；服务端备用 SCPI 导出保留旧格式。
 
 ## 5. 本地直连模式(仅 Windows 端保留)
 

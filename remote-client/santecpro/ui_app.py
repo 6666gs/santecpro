@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 import tempfile
@@ -19,7 +20,8 @@ os.environ.setdefault("XDG_CACHE_HOME", _CACHE_DIR)
 
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from PyQt5.QtCore import QObject, QThread, QTimer, pyqtSignal
+from PyQt5.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal
+from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -36,18 +38,27 @@ from PyQt5.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QScrollArea,
+    QAction,
+    QMenu,
+    QToolButton,
+    QWidgetAction,
+    QTabWidget,
+    QSizePolicy,
+    QShortcut,
     QSpinBox,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
-from santecpro.reference import calculate_reference_il_for_channel
 from santecpro.results import ScanResult
 from santecpro.sweep_rules import ALLOWED_STEP_PM, get_allowed_speeds_nm_s
 import config
 from santecpro.ui_controller import ConnectionSettings, ScanSettings, ScanUiController
+
+from santecpro.session import ScanSession, ScanRecord
+from santecpro.exporter import save_record_csv
+from santecpro.ui_script import ScriptUiMixin
 
 
 @dataclass
@@ -61,6 +72,7 @@ class TaskWorker(QObject):
 
     finished = pyqtSignal(object)
     failed = pyqtSignal(str)
+    progress = pyqtSignal(str)
 
     def __init__(self, label: str, task: Callable[[], object | None]) -> None:
         super().__init__()
@@ -86,6 +98,7 @@ class PlotCanvas(FigureCanvas):
 
     def clear(self) -> None:
         self.axes.clear()
+        self.axes.ticklabel_format(axis="x", style="plain", useOffset=False)
         self.axes.set_xlabel("Wavelength (nm)")
         self.axes.set_ylabel("Power (dBm)")
         self.axes.grid(True, alpha=0.3)
@@ -100,6 +113,7 @@ class PlotCanvas(FigureCanvas):
                 linewidth=1.0,
                 label=f"CH{channel} raw",
             )
+        self.axes.ticklabel_format(axis="x", style="plain", useOffset=False)
         self.axes.set_xlabel("Wavelength (nm)")
         self.axes.set_ylabel("Power (dBm)")
         self.axes.grid(True, alpha=0.3)
@@ -107,24 +121,14 @@ class PlotCanvas(FigureCanvas):
         self.axes.legend(loc="best")
         self.draw_idle()
 
-    def plot_reference_il(self, result: ScanResult, reference: ScanResult) -> None:
+    def plot_loss(self, record: ScanRecord) -> None:
         self.axes.clear()
-        for channel in result.channels():
-            if channel in reference.channels():
-                il = calculate_reference_il_for_channel(reference, result, channel)
-                self.axes.plot(il.wavelengths, il.il, linewidth=1.0, label=f"CH{channel} IL")
-            self.axes.plot(
-                result.wavelengths,
-                result.powers_for_channel(channel),
-                linewidth=0.8,
-                linestyle="--",
-                alpha=0.45,
-                label=f"CH{channel} raw",
-            )
+        for channel, values in sorted(record.loss.items()):
+            self.axes.plot(record.raw.wavelengths, values, linewidth=1.0, label=f"CH{channel} loss")
+        self.axes.ticklabel_format(axis="x", style="plain", useOffset=False)
         self.axes.set_xlabel("Wavelength (nm)")
-        self.axes.set_ylabel("Insertion loss (dB)")
+        self.axes.set_ylabel("Insertion loss (dB), reference − measurement")
         self.axes.grid(True, alpha=0.3)
-        self.axes.set_title(f"IL/raw, {len(result.wavelengths)} points")
         self.axes.legend(loc="best")
         self.draw_idle()
 
@@ -137,6 +141,7 @@ class PlotCanvas(FigureCanvas):
                 linewidth=1.0,
                 label=f"CH{channel} reference",
             )
+        self.axes.ticklabel_format(axis="x", style="plain", useOffset=False)
         self.axes.set_xlabel("Wavelength (nm)")
         self.axes.set_ylabel("Reference power (dBm)")
         self.axes.grid(True, alpha=0.3)
@@ -238,165 +243,320 @@ def QtAlignmentCenter():
     return Qt.AlignCenter
 
 
-class ScanMainWindow(QMainWindow):
+class ScanMainWindow(ScriptUiMixin, QMainWindow):
     """Main PyQt window for Santec scanning."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, auto_connect: bool = True) -> None:
         super().__init__()
         self.setWindowTitle("SantecPro 扫谱控制")
-        self.resize(1180, 760)
+        self.resize(1280, 800)
+        self.setMinimumSize(900, 560)
+        self._preview = False
 
         self._controller = ScanUiController()
         self._last_result: ScanResult | None = None
-        self._reference_result: ScanResult | None = None
+        self._session = ScanSession()
+        self._last_record: ScanRecord | None = None
         self._thread: QThread | None = None
         self._worker: TaskWorker | None = None
+        self._cancel_thread: QThread | None = None
+        self._cancel_worker: TaskWorker | None = None
+        self._task_label = ""
 
         root = QWidget()
         self.setCentralWidget(root)
 
-        main_layout = QHBoxLayout(root)
-        controls_scroll = QScrollArea()
-        controls_scroll.setWidgetResizable(True)
-        controls_scroll.setMinimumWidth(380)
-        controls_scroll.setWidget(self._build_controls())
-        main_layout.addWidget(controls_scroll, 0)
+        main_layout = QVBoxLayout(root)
+        main_layout.setContentsMargins(18, 12, 18, 12)
+        main_layout.setSpacing(10)
+        self._build_controls()
+        self._init_script()
+        main_layout.addWidget(self._build_header())
+        main_layout.addWidget(self._build_parameters())
         main_layout.addWidget(self._build_output(), 1)
+        main_layout.addWidget(self._build_actions())
+        main_layout.addWidget(self.status_label)
+        self._set_busy(False)
+        self._refresh_record_controls()
+        self.fullscreen_shortcut = QShortcut(QKeySequence("Ctrl+Meta+F" if sys.platform == "darwin" else "F11"), self)
+        self.fullscreen_shortcut.activated.connect(self._toggle_fullscreen)
+        self.escape_shortcut = QShortcut(QKeySequence("Escape"), self)
+        self.escape_shortcut.activated.connect(self._exit_fullscreen)
+        if auto_connect:
+            QTimer.singleShot(0, self._connect)
 
-    def _build_controls(self) -> QWidget:
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
+    @staticmethod
+    def _menu_button(text: str, menu: QMenu) -> QToolButton:
+        button = QToolButton()
+        button.setText(text)
+        button.setMenu(menu)
+        button.setPopupMode(QToolButton.InstantPopup)
+        button.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        button.setMinimumHeight(30)
+        button.setStyleSheet("QToolButton { padding: 3px 16px 3px 8px; }")
+        return button
 
-        conn_box = QGroupBox("连接")
-        conn_form = QFormLayout(conn_box)
+    @staticmethod
+    def _action(menu: QMenu, text: str, callback) -> QAction:
+        action = menu.addAction(text)
+        action.triggered.connect(callback)
+        return action
+
+    def _build_controls(self) -> None:
+        # Widgets retain their identities; less-used options live in a bounded popup.
         self.server_url_edit = QLineEdit(config.SERVER_URL)
         self.tsl_addr_edit = QLineEdit(config.TSL_ADDRESS)
         self.mpm_addr_edit = QLineEdit(config.MPM_ADDRESS)
-        conn_form.addRow("Server URL", self.server_url_edit)
-        conn_form.addRow("TSL 地址", self.tsl_addr_edit)
-        conn_form.addRow("MPM 地址", self.mpm_addr_edit)
-
-        conn_buttons = QHBoxLayout()
-        self.connect_btn = QPushButton("连接")
-        self.disconnect_btn = QPushButton("断开")
+        self.connect_btn = QPushButton("连接 / 初始化")
+        self.disconnect_btn = QPushButton("断开连接")
         self.start_server_btn = QPushButton("启动 Windows 服务")
         self.connect_btn.clicked.connect(self._connect)
         self.disconnect_btn.clicked.connect(self._disconnect)
         self.start_server_btn.clicked.connect(self._start_remote_server)
-        conn_buttons.addWidget(self.connect_btn)
-        conn_buttons.addWidget(self.disconnect_btn)
-        conn_buttons.addWidget(self.start_server_btn)
-        conn_form.addRow(conn_buttons)
-        layout.addWidget(conn_box)
-
-        laser_box = QGroupBox("激光")
-        laser_layout = QHBoxLayout(laser_box)
-        self.laser_on_btn = QPushButton("Laser ON")
-        self.laser_off_btn = QPushButton("Laser OFF")
-        self.alignment_btn = QPushButton("对光监视")
-        self.laser_on_btn.clicked.connect(lambda: self._run_task("laser_on", self._controller.laser_on))
-        self.laser_off_btn.clicked.connect(lambda: self._run_task("laser_off", self._controller.laser_off))
-        self.alignment_btn.clicked.connect(self._open_alignment_dialog)
-        laser_layout.addWidget(self.laser_on_btn)
-        laser_layout.addWidget(self.laser_off_btn)
-        laser_layout.addWidget(self.alignment_btn)
-        layout.addWidget(laser_box)
-
-        scan_box = QGroupBox("扫描参数")
-        scan_form = QFormLayout(scan_box)
-        self.start_spin = self._double_spin(1200.0, 1700.0, 1550.0, 4, 0.01)
-        self.stop_spin = self._double_spin(1200.0, 1700.0, 1550.1, 4, 0.01)
+        self.start_spin = self._double_spin(1200, 1700, 1550, 4, .01)
+        self.stop_spin = self._double_spin(1200, 1700, 1550.1, 4, .01)
+        self.power_spin = self._double_spin(-20, 20, 0, 2, .5)
         self.step_combo = QComboBox()
-        for step_pm in ALLOWED_STEP_PM:
-            step_nm = step_pm / 1000
-            self.step_combo.addItem(f"{step_pm:g} pm ({step_nm:g} nm)", step_nm)
+        for step in ALLOWED_STEP_PM:
+            self.step_combo.addItem(f"{step:g} pm", step / 1000)
         self.step_combo.setCurrentIndex(list(ALLOWED_STEP_PM).index(10))
-        self.step_combo.currentIndexChanged.connect(self._update_speed_choices)
         self.speed_combo = QComboBox()
-        self.power_spin = self._double_spin(-20.0, 20.0, 0.0, 2, 0.5)
-        self.sweep_mode_combo = QComboBox()
-        self.sweep_mode_combo.addItems(["1 - Continuous One-way"])
+        self.step_combo.currentIndexChanged.connect(self._update_speed_choices)
+        self._update_speed_choices()
         self.range_combo = QComboBox()
-        for value, text in [
-            (1, "Range 1 (-30 to +10 dBm)"),
-            (2, "Range 2 (-40 to 0 dBm)"),
-            (3, "Range 3 (-50 to -10 dBm)"),
-            (4, "Range 4 (-60 to -20 dBm)"),
-            (5, "Range 5 (-80 to -30 dBm)"),
-        ]:
-            self.range_combo.addItem(text, value)
+        for value, text in [(1, "−30 ~ +10 dBm"), (2, "−40 ~ 0 dBm"), (3, "−50 ~ −10 dBm"),
+                            (4, "−60 ~ −20 dBm"), (5, "−80 ~ −30 dBm")]:
+            self.range_combo.addItem(f"Range {value} · {text}", value)
         self.module_spin = self._int_spin(0, 4, 0)
-        self.channel_checks: list[QCheckBox] = []
-        channel_widget = QWidget()
-        channel_layout = QHBoxLayout(channel_widget)
-        channel_layout.setContentsMargins(0, 0, 0, 0)
+        self.sweep_mode_combo = QComboBox()
+        self.sweep_mode_combo.addItem("1 - Continuous One-way")
+        self.channel_checks = []
+        channel_menu = QMenu(self)
+        channel_panel = QWidget()
+        channel_layout = QVBoxLayout(channel_panel)
+        channel_layout.addWidget(QLabel("选择采集通道（可多选）"))
         for channel in range(1, 5):
             check = QCheckBox(f"CH{channel}")
             check.setChecked(channel == 1)
+            check.toggled.connect(self._update_channel_label)
             self.channel_checks.append(check)
             channel_layout.addWidget(check)
-        channel_layout.addStretch()
-        scan_form.addRow("Start (nm)", self.start_spin)
-        scan_form.addRow("Stop (nm)", self.stop_spin)
-        scan_form.addRow("Step", self.step_combo)
-        scan_form.addRow("Speed (nm/s)", self.speed_combo)
-        scan_form.addRow("Power (dBm)", self.power_spin)
-        scan_form.addRow("Sweep mode", self.sweep_mode_combo)
-        scan_form.addRow("MPM range", self.range_combo)
-        scan_form.addRow("MPM module", self.module_spin)
-        scan_form.addRow("MPM channels", channel_widget)
-        layout.addWidget(scan_box)
-        self._update_speed_choices()
-
-        action_box = QGroupBox("操作")
-        action_layout = QGridLayout(action_box)
-        self.save_check = QCheckBox("扫描后保存 CSV")
+        channel_action = QWidgetAction(channel_menu)
+        channel_action.setDefaultWidget(channel_panel)
+        channel_menu.addAction(channel_action)
+        self.channel_button = self._menu_button("CH1", channel_menu)
+        self.save_check = QCheckBox("自动保存")
         self.save_check.setChecked(True)
         self.save_path_edit = QLineEdit(str(Path.cwd() / "scan_result_raw.csv"))
-        browse_btn = QPushButton("选择")
-        browse_btn.clicked.connect(self._choose_csv_path)
-        self.scan_btn = QPushButton("单次扫描")
+        self.save_path_edit.setMinimumWidth(0)
+        self.export_combo = QComboBox()
+        self.export_combo.addItem("保存 Raw", "raw")
+        self.export_combo.addItem("保存 Loss", "loss")
+        self.export_combo.setToolTip("Loss = reference − measurement（正值插损）；只选择导出内容，不删除内存数据")
+        self.view_combo = QComboBox()
+        self.view_combo.addItem("显示 Raw", "raw")
+        self.view_combo.addItem("显示 Loss", "loss")
+        self.view_combo.currentIndexChanged.connect(self._plot_selected_record)
+        self.history_combo = QComboBox()
+        self.history_combo.setMinimumWidth(150)
+        self.history_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.history_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.history_combo.setMinimumContentsLength(12)
+        self.history_combo.setMaxVisibleItems(12)
+        self.history_combo.currentIndexChanged.connect(self._select_history)
+        self.reference_label = QLabel("未设置 reference：请先扫描线路")
+        self.reference_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.reference_label.setMinimumWidth(0)
+        self.scan_btn = QPushButton("扫描器件")
+        self.scan_btn.setDefault(True)
         self.scan_btn.clicked.connect(self._run_scan)
-        self.save_btn = QPushButton("保存当前结果")
+        self.cancel_btn = QPushButton("取消扫描")
+        self.cancel_btn.setToolTip("停止扫波与采集，保持激光开启")
+        self.cancel_btn.clicked.connect(self._cancel_scan)
+        self.reference_scan_btn = QPushButton("扫描 Reference")
+        self.reference_scan_btn.clicked.connect(self._run_reference_scan)
+        self.save_btn = QPushButton("保存所选扫描")
         self.save_btn.clicked.connect(self._save_last_result)
-        self.use_reference_check = QCheckBox("Use reference")
-        self.set_reference_btn = QPushButton("Set reference")
-        self.clear_reference_btn = QPushButton("Clear reference")
-        self.view_reference_btn = QPushButton("View reference")
-        self.set_reference_btn.clicked.connect(self._set_reference)
-        self.clear_reference_btn.clicked.connect(self._clear_reference)
-        self.view_reference_btn.clicked.connect(self._view_reference)
-        action_layout.addWidget(self.save_check, 0, 0, 1, 2)
-        action_layout.addWidget(self.save_path_edit, 1, 0)
-        action_layout.addWidget(browse_btn, 1, 1)
-        action_layout.addWidget(self.scan_btn, 2, 0, 1, 2)
-        action_layout.addWidget(self.save_btn, 3, 0, 1, 2)
-        action_layout.addWidget(self.use_reference_check, 4, 0, 1, 2)
-        action_layout.addWidget(self.set_reference_btn, 5, 0)
-        action_layout.addWidget(self.clear_reference_btn, 5, 1)
-        action_layout.addWidget(self.view_reference_btn, 6, 0, 1, 2)
-        layout.addWidget(action_box)
+        self.reference_menu = QMenu(self)
+        self.set_reference_btn = self._action(self.reference_menu, "将所选扫描设为 Reference", self._set_reference)
+        self.view_reference_btn = self._action(self.reference_menu, "查看 Reference", self._view_reference)
+        self.save_reference_btn = self._action(self.reference_menu, "保存 Reference Raw…", self._save_reference)
+        self.reference_menu.addSeparator()
+        self.clear_reference_btn = self._action(self.reference_menu, "清除当前 Reference", self._clear_reference)
+        self.instrument_menu = QMenu(self)
+        self.laser_on_btn = self._action(self.instrument_menu, "开启激光 / 等待预热", self._start_laser)
+        self.laser_off_btn = self._action(self.instrument_menu, "手动关闭激光", lambda: self._run_task("laser_off", self._controller.laser_off))
+        self.instrument_menu.addSeparator()
+        self.alignment_btn = self._action(self.instrument_menu, "对光监视…", self._open_alignment_dialog)
+        self.status_label = QLabel("未连接")
+        self.status_label.setWordWrap(True)
+        self.status_label.setMinimumHeight(32)
+        self.status_label.setMaximumHeight(44)
+        self.status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._build_settings_menu()
+        self._build_log_dialog()
 
-        layout.addStretch()
+    def _start_laser(self) -> None:
+        self._run_task("laser_on", lambda: self._controller.laser_on(progress=self._worker.progress.emit))
+
+    def _build_header(self) -> QWidget:
+        panel = QWidget()
+        row = QHBoxLayout(panel)
+        row.setContentsMargins(0, 0, 0, 0)
+        title = QLabel("SantecPro")
+        font = title.font()
+        font.setPointSize(18)
+        font.setBold(True)
+        title.setFont(font)
+        row.addWidget(title)
+        row.addStretch()
+        self.instrument_button = self._menu_button("仪器", self.instrument_menu)
+        self.settings_button = self._menu_button("设置", self.settings_menu)
+        self.script_button = QPushButton("扫描脚本…")
+        self.script_button.clicked.connect(self.script_dialog.show)
+        self.script_pause_btn = QPushButton("暂停脚本")
+        self.script_pause_btn.clicked.connect(self._pause_script)
+        self.log_button = QPushButton("运行日志")
+        self.log_button.clicked.connect(self.log_dialog.show)
+        self.fullscreen_button = QPushButton("进入全屏")
+        self.fullscreen_button.setToolTip("Mac：Control + Command + F；Esc 退出全屏")
+        self.fullscreen_button.clicked.connect(self._toggle_fullscreen)
+        for widget in (self.instrument_button, self.settings_button, self.script_button, self.script_pause_btn, self.log_button, self.fullscreen_button):
+            row.addWidget(widget)
+        return panel
+
+    def _build_parameters(self) -> QWidget:
+        panel = QGroupBox("扫描参数")
+        grid = QGridLayout(panel)
+        grid.setHorizontalSpacing(16)
+        controls = [("起点 · nm", self.start_spin), ("终点 · nm", self.stop_spin),
+                    ("步长", self.step_combo), ("速度 · nm/s", self.speed_combo),
+                    ("光功率 · dBm", self.power_spin), ("通道", self.channel_button)]
+        for col, (text, widget) in enumerate(controls):
+            widget.setAccessibleName(text)
+            widget.setMinimumWidth(0)
+            widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            grid.addWidget(QLabel(text), 0, col)
+            grid.addWidget(widget, 1, col)
+            grid.setColumnStretch(col, 1)
         return panel
 
     def _build_output(self) -> QWidget:
         panel = QWidget()
         layout = QVBoxLayout(panel)
-        self.status_label = QLabel("未连接")
+        layout.setContentsMargins(0, 0, 0, 0)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("扫描历史"))
+        row.addWidget(self.history_combo, 2)
+        row.addWidget(self.view_combo)
+        self.reference_button = self._menu_button("Reference", self.reference_menu)
+        row.addWidget(self.reference_button)
+        layout.addLayout(row)
         self.plot_canvas = PlotCanvas()
+        self.plot_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.plot_canvas.setMinimumSize(300, 200)
+        layout.addWidget(self.plot_canvas, 1)
+        layout.addWidget(self.reference_label)
+        return panel
+
+    def _build_actions(self) -> QWidget:
+        panel = QWidget()
+        row = QHBoxLayout(panel)
+        row.setContentsMargins(0, 0, 0, 0)
+        for widget in (self.reference_scan_btn, self.scan_btn, self.cancel_btn):
+            widget.setMinimumHeight(32)
+            row.addWidget(widget)
+        row.addStretch()
+        row.addWidget(self.save_check)
+        row.addWidget(self.export_combo)
+        row.addWidget(self.save_btn)
+        return panel
+
+    def _build_settings_menu(self) -> None:
+        self.settings_menu = QMenu(self)
+        panel = QWidget()
+        panel.setFixedWidth(480)
+        layout = QVBoxLayout(panel)
+        self.settings_tabs = QTabWidget()
+        layout.addWidget(self.settings_tabs)
+        connection = QWidget()
+        form = QFormLayout(connection)
+        form.addRow("Windows 服务", self.server_url_edit)
+        form.addRow("TSL 地址", self.tsl_addr_edit)
+        form.addRow("MPM 地址", self.mpm_addr_edit)
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.connect_btn)
+        buttons.addWidget(self.disconnect_btn)
+        form.addRow(buttons)
+        form.addRow(self.start_server_btn)
+        self.settings_tabs.addTab(connection, "连接")
+        acquisition = QWidget()
+        form = QFormLayout(acquisition)
+        form.addRow("功率计量程", self.range_combo)
+        form.addRow("模块编号（从 0 开始）", self.module_spin)
+        form.addRow("扫描模式", self.sweep_mode_combo)
+        note = QLabel("起止波长决定扫描方向。更改模块或通道后，请确认 reference 对应相同光路。")
+        note.setWordWrap(True)
+        form.addRow(note)
+        self.settings_tabs.addTab(acquisition, "采集")
+        output = QWidget()
+        form = QFormLayout(output)
+        form.addRow("保存路径", self.save_path_edit)
+        browse = QPushButton("选择保存路径…")
+        browse.clicked.connect(self._choose_csv_path)
+        form.addRow(browse)
+        note = QLabel("Raw 与 Loss 分别导出；同名文件自动编号。Reference 只导出 Raw。")
+        note.setWordWrap(True)
+        form.addRow(note)
+        self.settings_tabs.addTab(output, "保存")
+        done = QPushButton("完成")
+        done.clicked.connect(self.settings_menu.hide)
+        layout.addWidget(done, 0, Qt.AlignRight)
+        action = QWidgetAction(self.settings_menu)
+        action.setDefaultWidget(panel)
+        self.settings_menu.addAction(action)
+
+    def _build_log_dialog(self) -> None:
+        # Full logs remain available in a separate window; the main page never scrolls.
+        self.log_dialog = QDialog(self)
+        self.log_dialog.setWindowTitle("运行日志")
+        self.log_dialog.resize(720, 400)
+        layout = QVBoxLayout(self.log_dialog)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setMinimumHeight(180)
-        layout.addWidget(self.status_label)
-        layout.addWidget(self.plot_canvas, 1)
-        layout.addWidget(QLabel("日志"))
         layout.addWidget(self.log_text)
-        return panel
+        close = QPushButton("关闭")
+        close.clicked.connect(self.log_dialog.hide)
+        layout.addWidget(close, 0, Qt.AlignRight)
+
+    def _update_channel_label(self) -> None:
+        if hasattr(self, "channel_button"):
+            channels = [f"CH{i + 1}" for i, check in enumerate(self.channel_checks) if check.isChecked()]
+            self.channel_button.setText(" + ".join(channels) if len(channels) <= 2 else f"{len(channels)} 个通道")
+            self.channel_button.setToolTip(" + ".join(channels) or "请至少选择一个通道")
+
+    def _toggle_fullscreen(self) -> None:
+        if self.isFullScreen():
+            self._exit_fullscreen()
+        else:
+            self._before_fullscreen_maximized = self.isMaximized()
+            self.showFullScreen()
+
+    def _exit_fullscreen(self) -> None:
+        if self.isFullScreen():
+            if getattr(self, "_before_fullscreen_maximized", False):
+                self.showMaximized()
+            else:
+                self.showNormal()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if hasattr(self, "fullscreen_button"):
+            self.fullscreen_button.setText("退出全屏" if self.isFullScreen() else "进入全屏")
 
     def _connect(self) -> None:
         settings = self._connection_settings()
-        self._run_task("connect", lambda: self._controller.connect(settings))
+        self._run_task("connect", lambda: self._controller.connect(settings, progress=self._worker.progress.emit))
 
     def _start_remote_server(self) -> None:
         settings = self._connection_settings()
@@ -405,11 +565,16 @@ class ScanMainWindow(QMainWindow):
     def _disconnect(self) -> None:
         self._controller.disconnect()
         self.status_label.setText("已断开")
-        self._log("Disconnected")
+        self._log("Disconnected; laser output unchanged")
+        self._set_busy(False)
 
     def _run_scan(self) -> None:
         settings = self._scan_settings()
         self._run_task("scan", lambda: self._controller.run_single_scan(settings))
+
+    def _run_reference_scan(self) -> None:
+        settings = self._scan_settings()
+        self._run_task("reference_scan", lambda: self._controller.run_single_scan(settings))
 
     def _open_alignment_dialog(self) -> None:
         channels = self._selected_channels()
@@ -424,116 +589,170 @@ class ScanMainWindow(QMainWindow):
         dialog.show()
 
     def _save_last_result(self) -> None:
-        if self._last_result is None:
+        if self._last_record is None:
             QMessageBox.warning(self, "无数据", "当前没有可保存的扫描结果。")
             return
-        self._save_result(self._last_result)
+        self._save_result(self._last_record)
 
-    def _save_result(self, result: ScanResult) -> None:
-        path = self.save_path_edit.text().strip()
-        if not path:
-            path = str(Path.cwd() / "scan_result_raw.csv")
-            self.save_path_edit.setText(path)
-        if self.use_reference_check.isChecked() and self._reference_result is not None:
-            self._save_il_csv(result, self._reference_result, path)
-        elif result.channel_powers:
-            self._save_multi_raw_csv(result, path)
+    def _save_result(self, record: ScanRecord) -> None:
+        kind = "raw" if record.is_reference else self.export_combo.currentData()
+        self._export_record(record, self.save_path_edit.text().strip() or "scan_result.csv", kind)
+
+    def _export_record(self, record: ScanRecord, path: str, kind: str) -> None:
+        target = Path(path)
+        stem = target.stem
+        for suffix in ("_raw", "_loss"):
+            if stem.endswith(suffix):
+                stem = stem[:-len(suffix)]
+                break
+        target = target.with_name(f"{stem}_{kind}.csv")
+        index = 1
+        while target.exists():
+            target = target.with_name(f"{stem}_{index:03d}_{kind}.csv")
+            index += 1
+        try:
+            save_record_csv(record, str(target), kind)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "保存失败", str(exc))
+            return
+        self._log(f"Saved {kind}: {target}")
+
+    def _save_reference(self) -> None:
+        if self._session.reference_index is None:
+            QMessageBox.warning(self, "无 reference", "请先扫描并设置线路 reference。")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "保存 Reference Raw", "reference_raw.csv", "CSV Files (*.csv)")
+        if path:
+            self._export_record(self._session.records[self._session.reference_index], path, "raw")
+
+    def _select_history(self, index: int) -> None:
+        if index < 0 or index >= len(self._session.records):
+            return
+        self._last_record = self._session.records[index]
+        self._last_result = self._last_record.raw
+        self._refresh_record_controls()
+        self._plot_selected_record()
+
+    def _refresh_record_controls(self) -> None:
+        available = bool(self._last_record and self._last_record.loss and not self._last_record.is_reference)
+        for combo in (self.export_combo, self.view_combo):
+            combo.model().item(1).setEnabled(available)
+            if not available:
+                combo.setCurrentIndex(0)
+        self.save_reference_btn.setEnabled(self._thread is None and self._session.reference is not None)
+        if self._session.reference_index is None:
+            self.reference_label.setText("未设置 reference：请先扫描线路")
         else:
-            self._controller.save_scan_csv(result, path)
-        self._log(f"Saved CSV: {path}")
+            self.reference_label.setText(f"当前 Reference：扫描 #{self._session.reference_index + 1}（只保存 Raw）")
 
-    def _save_multi_raw_csv(self, result: ScanResult, path: str) -> None:
-        with open(path, "w", encoding="utf-8", newline="") as f:
-            headers = ["wavelength_nm"]
-            for channel in result.channels():
-                headers.append(f"ch{channel}_raw_dbm")
-            f.write(",".join(headers) + "\n")
-            for idx, wl in enumerate(result.wavelengths):
-                row = [f"{wl:.9f}"]
-                for channel in result.channels():
-                    row.append(f"{result.powers_for_channel(channel)[idx]:.9f}")
-                f.write(",".join(row) + "\n")
-
-    def _save_il_csv(self, result: ScanResult, reference: ScanResult, path: str) -> None:
-        channels = result.channels()
-        reference_channels = set(reference.channels())
-        with open(path, "w", encoding="utf-8", newline="") as f:
-            headers = ["wavelength_nm"]
-            for channel in channels:
-                headers.append(f"ch{channel}_raw_dbm")
-                if channel in reference_channels:
-                    headers.append(f"ch{channel}_reference_dbm")
-                    headers.append(f"ch{channel}_insertion_loss_db")
-            f.write(",".join(headers) + "\n")
-            il_by_channel = {
-                channel: calculate_reference_il_for_channel(reference, result, channel)
-                for channel in channels
-                if channel in reference_channels
-            }
-            for idx, wl in enumerate(result.wavelengths):
-                row = [f"{wl:.9f}"]
-                for channel in channels:
-                    raw = result.powers_for_channel(channel)[idx]
-                    row.append(f"{raw:.9f}")
-                    if channel in il_by_channel:
-                        il = il_by_channel[channel]
-                        row.append(f"{il.reference_powers[idx]:.9f}")
-                        row.append(f"{il.il[idx]:.9f}")
-                f.write(",".join(row) + "\n")
+    def _plot_selected_record(self, *args) -> None:
+        record = self._last_record
+        if record is None:
+            return
+        if self.view_combo.currentData() == "loss" and record.loss:
+            self.plot_canvas.plot_loss(record)
+        else:
+            self.plot_canvas.plot_scan(record.raw)
+        state = (f"Raw + Loss，基于 Reference #{record.reference_index + 1}"
+                 if record.loss else f"Raw；{record.loss_error}")
+        self.status_label.setText(f"扫描 #{self.history_combo.currentIndex() + 1}：{len(record.raw.wavelengths)} 点；{state}")
 
     def _run_task(self, label: str, task: Callable[[], object | None]) -> None:
+        if self._preview:
+            self.status_label.setText("界面预览模式：不连接或操作真实仪器")
+            return
         if self._thread is not None:
             QMessageBox.information(self, "正在运行", "已有任务正在运行。")
             return
+        self.settings_menu.hide()
+        self._task_label = label
         self._set_busy(True)
         self._log(f"Starting {label}...")
         self._thread = QThread(self)
         self._worker = TaskWorker(label, task)
         self._worker.moveToThread(self._thread)
+        self._worker.progress.connect(self._report_progress)
         self._thread.started.connect(self._worker.run)
         self._worker.finished.connect(self._task_finished)
         self._worker.failed.connect(self._task_failed)
         self._worker.finished.connect(self._thread.quit)
         self._worker.failed.connect(self._thread.quit)
+        self._worker.finished.connect(self._worker.deleteLater)
+        self._worker.failed.connect(self._worker.deleteLater)
+        self._thread.finished.connect(self._thread.deleteLater)
         self._thread.finished.connect(self._thread_finished)
         self._thread.start()
+
+    def _report_progress(self, message: str) -> None:
+        self.status_label.setText(message)
+
+    def _cancel_scan(self) -> None:
+        if self._script_job is not None:
+            self._stop_script()
+            if self._thread is None:
+                return
+        if self._cancel_thread is not None:
+            return
+        self.cancel_btn.setEnabled(False)
+        self._cancel_thread = QThread(self)
+        self._cancel_worker = TaskWorker("cancel", self._controller.cancel_scan)
+        self._cancel_worker.moveToThread(self._cancel_thread)
+        self._cancel_thread.started.connect(self._cancel_worker.run)
+        self._cancel_worker.finished.connect(self._cancel_requested)
+        self._cancel_worker.failed.connect(self._task_failed)
+        self._cancel_worker.finished.connect(self._cancel_thread.quit)
+        self._cancel_worker.failed.connect(self._cancel_thread.quit)
+        self._cancel_worker.finished.connect(self._cancel_worker.deleteLater)
+        self._cancel_worker.failed.connect(self._cancel_worker.deleteLater)
+        self._cancel_thread.finished.connect(self._cancel_thread.deleteLater)
+        self._cancel_thread.finished.connect(self._cancel_finished)
+        self._cancel_thread.start()
+
+    def _cancel_requested(self, result: WorkerResult) -> None:
+        self._log(f"取消请求: {result.value}；等待扫描线程停止，激光保持开启。")
+
+    def _cancel_finished(self) -> None:
+        self._cancel_thread = None
+        self._cancel_worker = None
+        self._set_busy(self._thread is not None)
+
+    def closeEvent(self, event) -> None:
+        if self._script_job is not None or self._thread is not None or self._cancel_thread is not None:
+            QMessageBox.information(self, "任务仍在运行", "请等待初始化完成，或取消扫描后再关闭。激光不会自动关闭。")
+            event.ignore()
+            return
+        event.accept()
 
     def _task_finished(self, result: WorkerResult) -> None:
         self._log(f"Finished {result.label}")
         if result.label == "connect":
-            self.status_label.setText(f"已连接: {result.value}")
+            self.status_label.setText(f"已连接，激光就绪：{result.value.get('tsl_idn', '')} / {result.value.get('mpm_idn', '')}")
+        elif result.label == "laser_on":
+            self.status_label.setText("激光已就绪")
+        elif result.label == "laser_off":
+            self.status_label.setText("激光已手动关闭；再次开启需等待预热")
         elif result.label == "start_server":
             self.status_label.setText(f"Windows 服务已启动: {result.value}")
-        elif result.label == "scan" and isinstance(result.value, ScanResult):
-            self._last_result = result.value
-            if self.use_reference_check.isChecked() and self._reference_result is not None:
-                self.plot_canvas.plot_reference_il(result.value, self._reference_result)
-                common_channels = sorted(set(result.value.channels()) & set(self._reference_result.channels()))
-                if not common_channels:
-                    self.status_label.setText("Reference 通道不匹配，已显示 raw 数据")
-                    self._log("Reference skipped: no common channel with current scan")
-                    self.plot_canvas.plot_scan(result.value)
-                    return
-                il = calculate_reference_il_for_channel(
-                    self._reference_result,
-                    result.value,
-                    common_channels[0],
-                )
-                self.status_label.setText(
-                    f"IL 完成: CH{common_channels}, {len(il.wavelengths)} points, "
-                    f"{np.nanmin(il.il):.3f} to {np.nanmax(il.il):.3f} dB"
-                )
-            else:
-                self.plot_canvas.plot_scan(result.value)
-                powers = result.value.powers
-                self.status_label.setText(
-                    f"扫描完成: {len(result.value.wavelengths)} points, "
-                    f"{np.nanmin(powers):.3f} to {np.nanmax(powers):.3f} dBm"
-                )
+        elif result.label == "script_scan" and isinstance(result.value, ScanResult):
+            self._script_result(result.value)
+        elif result.label in ("scan", "reference_scan") and isinstance(result.value, ScanResult):
+            raw = result.value
+            raw.scan_params.setdefault("tsl_idn", self._controller._tsl_idn)
+            raw.scan_params.setdefault("mpm_idn", self._controller._mpm_idn)
+            record = self._session.add(raw, is_reference=result.label == "reference_scan")
+            index = len(self._session.records) - 1
+            self.history_combo.addItem(f"#{index + 1} {'Reference' if record.is_reference else '测量'} {raw.timestamp}")
+            self.history_combo.setCurrentIndex(index)
+            self._select_history(index)
+            if record.loss_error and not record.is_reference:
+                self._log(record.loss_error)
             if self.save_check.isChecked():
-                self._save_result(result.value)
+                self._save_result(record)
 
     def _task_failed(self, trace: str) -> None:
+        if self._script_job is not None:
+            self._script_stopped = True
+            self._script_error = trace.splitlines()[-1] if trace else "Unknown error"
         self._log(trace)
         QMessageBox.critical(self, "任务失败", trace.splitlines()[-1] if trace else "Unknown error")
 
@@ -541,6 +760,8 @@ class ScanMainWindow(QMainWindow):
         self._thread = None
         self._worker = None
         self._set_busy(False)
+        if self._script_job is not None:
+            self._script_after_thread()
 
     def _connection_settings(self) -> ConnectionSettings:
         return ConnectionSettings(
@@ -576,23 +797,26 @@ class ScanMainWindow(QMainWindow):
         return channels
 
     def _set_reference(self) -> None:
-        if self._last_result is None:
-            QMessageBox.warning(self, "无数据", "当前没有可记录为 reference 的扫描结果。")
+        index = self.history_combo.currentIndex()
+        if index < 0:
+            QMessageBox.warning(self, "无数据", "请先扫描线路，再设置 reference。")
             return
-        self._reference_result = self._last_result
-        self.use_reference_check.setChecked(True)
-        self._log(f"Reference set: {len(self._reference_result.wavelengths)} points")
+        self._session.set_reference(index)
+        self.history_combo.setItemText(index, f"#{index + 1} Reference {self._last_record.raw.timestamp}")
+        self._refresh_record_controls()
+        self._plot_selected_record()
+        self._log(f"Reference set from scan #{index + 1}; future scans retain raw and loss")
 
     def _clear_reference(self) -> None:
-        self._reference_result = None
-        self.use_reference_check.setChecked(False)
-        self._log("Reference cleared")
+        self._session.clear_reference()
+        self._refresh_record_controls()
+        self._log("Reference cleared; stored measurements unchanged")
 
     def _view_reference(self) -> None:
-        if self._reference_result is None:
-            QMessageBox.warning(self, "无 reference", "当前没有记录 reference。")
+        if self._session.reference is None:
+            QMessageBox.warning(self, "无 reference", "当前没有扫描设置的 reference。")
             return
-        self.plot_canvas.plot_reference(self._reference_result)
+        self.plot_canvas.plot_reference(self._session.reference)
 
     def _choose_csv_path(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -615,6 +839,12 @@ class ScanMainWindow(QMainWindow):
             self.speed_combo.setCurrentIndex(allowed.index(current))
 
     def _set_busy(self, busy: bool) -> None:
+        script_active = self._script_job is not None
+        busy = busy or script_active
+        self.script_button.setEnabled(not busy)
+        self.script_pause_btn.setVisible(script_active)
+        self.script_pause_btn.setEnabled(script_active and not self._script_stopped)
+        self.script_pause_btn.setText('继续脚本' if self._script_paused else '暂停脚本')
         for widget in [
             self.connect_btn,
             self.disconnect_btn,
@@ -627,8 +857,27 @@ class ScanMainWindow(QMainWindow):
             self.set_reference_btn,
             self.clear_reference_btn,
             self.view_reference_btn,
+            self.reference_scan_btn,
+            self.save_reference_btn,
+            self.history_combo,
         ]:
             widget.setEnabled(not busy)
+        connected = self._controller.is_connected
+        ready = connected and self._controller.laser_ready
+        self.scan_btn.setEnabled(not busy and ready)
+        self.reference_scan_btn.setEnabled(not busy and ready)
+        self.save_reference_btn.setEnabled(not busy and self._session.reference is not None)
+        self.alignment_btn.setEnabled(not busy and ready)
+        self.laser_on_btn.setEnabled(not busy and connected)
+        self.laser_off_btn.setEnabled(not busy and connected)
+        self.history_combo.setEnabled(not busy or script_active)
+        for control in (self.start_spin, self.stop_spin, self.step_combo, self.speed_combo,
+                        self.power_spin, self.channel_button, self.save_check):
+            control.setEnabled(not script_active)
+        self.settings_button.setEnabled(not script_active)
+        self.export_combo.setEnabled(not script_active)
+        self.cancel_btn.setText("停止脚本" if script_active else "取消扫描")
+        self.cancel_btn.setEnabled(busy and self._task_label in ("scan", "reference_scan", "script_scan") and self._cancel_thread is None)
 
     def _log(self, message: str) -> None:
         self.log_text.append(message)
@@ -657,9 +906,35 @@ class ScanMainWindow(QMainWindow):
 
 
 def main() -> int:
-    app = QApplication(sys.argv)
-    window = ScanMainWindow()
-    window.show()
+    parser = argparse.ArgumentParser(description="SantecPro macOS/desktop scan UI")
+    display = parser.add_mutually_exclusive_group()
+    display.add_argument("--fullscreen", action="store_true", help="start in native full screen")
+    display.add_argument("--windowed", action="store_true", help="start in a normal resizable window")
+    parser.add_argument("--preview", action="store_true", help="show sample spectra without connecting to instruments")
+    args = parser.parse_args()
+    app = QApplication(sys.argv[:1])
+    window = ScanMainWindow(auto_connect=not args.preview)
+    if args.preview:
+        window._preview = True
+        window.setWindowTitle("SantecPro · 界面预览（未连接仪器）")
+        window.save_check.setChecked(False)
+        wavelengths = np.linspace(1550, 1550.1, 501)
+        for label, powers in [
+            ("reference_scan", np.full(501, -2.0)),
+            ("scan", -8 - 14 / (1 + ((wavelengths - 1550.045) / .003) ** 2)),
+        ]:
+            scan = ScanResult(wavelengths, powers, np.full(501, 7.0),
+                              scan_params={"start_wl":1550., "stop_wl":1550.1, "step":.0002},
+                              timestamp="预览数据", channel_powers={1:powers})
+            window._task_finished(WorkerResult(label, scan))
+        window._set_busy(False)
+        window.status_label.setText("界面预览 · 示例光谱 · 未连接仪器")
+    if args.fullscreen:
+        window.showFullScreen()
+    elif args.windowed:
+        window.show()
+    else:
+        window.showMaximized()
     return app.exec_()
 
 

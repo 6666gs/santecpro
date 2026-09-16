@@ -7,6 +7,9 @@ hardware, no network — so it is fully unit-testable and used by both the CLI
 Grammar (one directive per line; ``#`` starts a full-line comment)::
 
     job <name>
+    device "device name"
+    output "~/Measurements"
+    wait 5s                              # after the preceding scan
     set <key>=<value> ...                 # defaults: power range channels averaging
     scan <label> <start> <stop> step=<v>{pm|nm} speed=<v> [power= range= channels= averaging= dir=]
 
@@ -17,7 +20,9 @@ segment followed by a reverse segment.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+import shlex
+import math
 
 from santecpro.sweep_rules import validate_sts_sweep_params
 
@@ -47,12 +52,15 @@ class Segment:
     mpm_channels: tuple[int, ...]
     mpm_averaging_time_ms: float
     direction: str                    # "fwd" | "rev"
+    wait_after_s: float = 0.0
 
 
 @dataclass(frozen=True)
 class JobSpec:
     name: str
     segments: tuple[Segment, ...]
+    device: str | None = None
+    output: str | None = None
 
 
 def parse_job(text: str, *, default_name: str = "job") -> JobSpec:
@@ -63,6 +71,7 @@ def parse_job(text: str, *, default_name: str = "job") -> JobSpec:
             line number of the offending line.
     """
     name: str | None = None
+    device = output = None
     defaults = dict(_BUILTIN_DEFAULTS)
     segments: list[Segment] = []
 
@@ -70,7 +79,10 @@ def parse_job(text: str, *, default_name: str = "job") -> JobSpec:
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        tokens = line.split()
+        try:
+            tokens = shlex.split(line)
+        except ValueError as exc:
+            raise JobScriptError(lineno, str(exc)) from None
         keyword, args = tokens[0], tokens[1:]
 
         if keyword == "job":
@@ -78,15 +90,34 @@ def parse_job(text: str, *, default_name: str = "job") -> JobSpec:
                 raise JobScriptError(lineno, "job needs exactly one name: job <name>")
             if name is not None:
                 raise JobScriptError(lineno, "job already set earlier")
-            name = args[0]
+            name = _filename(args[0], lineno)
+        elif keyword in ("device", "output"):
+            if len(args) != 1 or not args[0].strip():
+                raise JobScriptError(lineno, f'{keyword} needs one value; quote values containing spaces')
+            if keyword == "device":
+                if device is not None:
+                    raise JobScriptError(lineno, "device already set earlier")
+                device = _filename(args[0], lineno)
+            else:
+                if output is not None:
+                    raise JobScriptError(lineno, "output already set earlier")
+                output = args[0]
+        elif keyword == "wait":
+            if not segments or len(args) != 1 or not args[0].endswith("s"):
+                raise JobScriptError(lineno, "wait needs a preceding scan and seconds, e.g. wait 5s")
+            seconds = _num(args[0][:-1], lineno, "wait")
+            if seconds < 0:
+                raise JobScriptError(lineno, "wait must be non-negative")
+            segments[-1] = replace(segments[-1], wait_after_s=segments[-1].wait_after_s + seconds)
         elif keyword == "set":
             _apply_set(defaults, args, lineno)
         elif keyword == "scan":
             segments.extend(_parse_scan(args, lineno, defaults))
         else:
-            raise JobScriptError(lineno, f"unknown directive '{keyword}' (expected job/set/scan)")
+            raise JobScriptError(lineno, f"unknown directive '{keyword}' (expected job/device/output/set/scan/wait)")
 
-    return JobSpec(name=name or default_name, segments=tuple(segments))
+    return JobSpec(name=name or _filename(default_name, 0), segments=tuple(segments),
+                   device=device, output=output)
 
 
 # --- helpers ---------------------------------------------------------------
@@ -99,9 +130,18 @@ def _split_kv(token: str, lineno: int) -> tuple[str, str]:
     return key.strip(), value.strip()
 
 
+def _filename(value: str, lineno: int) -> str:
+    if not value.strip() or value in (".", "..") or any(char in value for char in '/\\:*?"<>|'):
+        raise JobScriptError(lineno, "job names and scan labels must be valid filenames")
+    return value
+
+
 def _num(value: str, lineno: int, what: str) -> float:
     try:
-        return float(value)
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError("non-finite")
+        return number
     except ValueError:
         raise JobScriptError(lineno, f"{what} must be a number (got '{value}')") from None
 
@@ -159,7 +199,7 @@ def _parse_scan(args: list[str], lineno: int, defaults: dict) -> list[Segment]:
         raise JobScriptError(
             lineno, "scan needs: scan <label> <start> <stop> step=<v>pm|nm speed=<v>"
         )
-    label = args[0]
+    label = _filename(args[0], lineno)
     start = _num(args[1], lineno, "start")
     stop = _num(args[2], lineno, "stop")
 
@@ -194,6 +234,8 @@ def _parse_scan(args: list[str], lineno: int, defaults: dict) -> list[Segment]:
     if direction not in ("forward", "reverse", "both"):
         raise JobScriptError(lineno, f"invalid dir '{direction}' (forward|reverse|both)")
 
+    if params["range"] not in range(1, 6) or params["averaging"] <= 0:
+        raise JobScriptError(lineno, "range must be 1-5 and averaging must be positive")
     try:
         validate_sts_sweep_params(start, stop, step, speed)
     except ValueError as exc:

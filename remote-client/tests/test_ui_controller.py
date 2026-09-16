@@ -11,7 +11,7 @@ from santecpro.ui_controller import ConnectionSettings, ScanSettings, ScanUiCont
 
 def test_remote_controller_connects_and_runs_single_scan(monkeypatch):
     remote = MagicMock()
-    remote.status.return_value = {"status": "running"}
+    remote.check_instruments.return_value = {"status": "running"}
     remote.run_stsprocess_scan.return_value = "scan-result"
     remote_cls = MagicMock(return_value=remote)
     monkeypatch.setattr("santecpro.ui_controller.RemoteScanner", remote_cls)
@@ -41,7 +41,9 @@ def test_remote_controller_connects_and_runs_single_scan(monkeypatch):
 
     remote_cls.assert_called_once_with("http://192.168.100.103:5000")
     remote.connect.assert_not_called()
-    remote.status.assert_called_once_with()
+    remote.check_instruments.assert_called_once_with()
+    remote.set_addresses.assert_called_once_with(conn.tsl_address, conn.mpm_address)
+    remote.prepare_laser.assert_called_once_with(progress=None)
     assert status == {"status": "running"}
     remote.configure.assert_not_called()
     remote.run_stsprocess_scan.assert_called_once_with(
@@ -84,7 +86,7 @@ def test_controller_rejects_scan_before_connect():
 
 def test_remote_controller_reads_alignment_powers(monkeypatch):
     remote = MagicMock()
-    remote.status.return_value = {"status": "running"}
+    remote.check_instruments.return_value = {"status": "running"}
     remote.start_alignment.return_value = {1: -10.0, 2: -11.0}
     remote.read_alignment_powers.return_value = {1: -9.5, 2: -10.5}
     monkeypatch.setattr("santecpro.ui_controller.RemoteScanner", MagicMock(return_value=remote))
@@ -94,3 +96,15 @@ def test_remote_controller_reads_alignment_powers(monkeypatch):
 
     assert controller.start_alignment(0.0, 0, (1, 2), 1) == {1: -10.0, 2: -11.0}
     assert controller.read_alignment_powers(0, (1, 2)) == {1: -9.5, 2: -10.5}
+
+
+def test_failed_warmup_does_not_mark_controller_connected(monkeypatch):
+    remote = MagicMock()
+    remote.prepare_laser.side_effect = TimeoutError('warming up')
+    monkeypatch.setattr('santecpro.ui_controller.RemoteScanner', MagicMock(return_value=remote))
+    controller = ScanUiController()
+    with pytest.raises(TimeoutError):
+        controller.connect(ConnectionSettings('http://test'))
+    assert not controller.is_connected
+    assert not controller.laser_ready
+    remote.laser_off.assert_not_called()

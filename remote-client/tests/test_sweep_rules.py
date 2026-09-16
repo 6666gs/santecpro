@@ -56,3 +56,9 @@ def test_validate_rejects_unsupported_step():
 def test_validate_rejects_unsupported_speed_for_one_pm_and_larger_steps():
     with pytest.raises(ValueError, match="Unsupported sweep speed"):
         validate_sts_sweep_params(start_wl=1540, stop_wl=1541, step=0.001, speed=2)
+
+
+@pytest.mark.parametrize('start,stop', [(float('nan'),1550), (1550,float('inf')), (1550,1550), (-1,1550)])
+def test_rejects_invalid_endpoints(start, stop):
+    with pytest.raises(ValueError):
+        validate_sts_sweep_params(start, stop, .01, 1)

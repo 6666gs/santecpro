@@ -45,6 +45,7 @@ class ScanUiController:
 
     def __init__(self) -> None:
         self._scanner: RemoteScanner | None = None
+        self.laser_ready = False
         self._tsl_idn = ""
         self._mpm_idn = ""
 
@@ -52,12 +53,15 @@ class ScanUiController:
     def is_connected(self) -> bool:
         return self._scanner is not None
 
-    def connect(self, settings: ConnectionSettings) -> dict:
+    def connect(self, settings: ConnectionSettings, progress=None) -> dict:
         """Connect to the remote server and return its status."""
         self.disconnect()
         scanner = RemoteScanner(settings.server_url)
+        scanner.set_addresses(settings.tsl_address, settings.mpm_address)
+        status = scanner.check_instruments()
+        scanner.prepare_laser(progress=progress)
         self._scanner = scanner
-        status = scanner.status()
+        self.laser_ready = True
         self._tsl_idn = status.get("tsl_idn") or ""
         self._mpm_idn = status.get("mpm_idn") or ""
         return status
@@ -70,22 +74,24 @@ class ScanUiController:
 
     def disconnect(self) -> None:
         """Disconnect from the remote server."""
-        if self._scanner is not None:
-            try:
-                self._scanner.disconnect()
-            except Exception:
-                pass
         self._scanner = None
+        self.laser_ready = False
         self._tsl_idn = ""
         self._mpm_idn = ""
 
-    def laser_on(self) -> None:
+    def cancel_scan(self) -> dict:
+        return self._require_scanner().cancel_scan()
+
+    def laser_on(self, progress=None) -> None:
         """Turn on laser output on the remote server."""
-        self._require_scanner().laser_on()
+        self.laser_ready = False
+        self._require_scanner().prepare_laser(progress=progress)
+        self.laser_ready = True
 
     def laser_off(self) -> None:
         """Turn off laser output on the remote server."""
         self._require_scanner().laser_off()
+        self.laser_ready = False
 
     def run_single_scan(self, settings: ScanSettings) -> ScanResult:
         """Run one STSProcess scan on the remote server."""

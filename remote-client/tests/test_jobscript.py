@@ -145,3 +145,43 @@ def test_unknown_directive_errors():
 def test_scan_missing_positionals_errors():
     with pytest.raises(JobScriptError, match="line 1"):
         parse_job("scan s 1500 step=1pm speed=10")
+
+
+@pytest.mark.parametrize('text', [
+    'job ../../outside',
+    'scan ../outside 1500 1501 step=1pm speed=10',
+    'scan a 1500 1501 step=1pm speed=10 power=nan',
+    'scan a 1500 1501 step=1pm speed=10 range=0',
+    'scan a 1500 1501 step=1pm speed=10 averaging=-1',
+])
+def test_rejects_unsafe_names_and_invalid_values(text):
+    with pytest.raises(JobScriptError):
+        parse_job(text)
+
+
+def test_device_output_and_wait():
+    job = parse_job('device "器件 A"\noutput "~/data with spaces"\n'
+                    'scan wide 1500 1630 step=1pm speed=20\nwait 5s\n'
+                    'scan fine 1545 1555 step=0.1pm speed=1')
+    assert job.device == '器件 A'
+    assert job.output == '~/data with spaces'
+    assert job.segments[0].wait_after_s == 5
+    assert job.segments[1].wait_after_s == 0
+    assert job.segments[1].step == 0.0001
+
+
+@pytest.mark.parametrize('text', [
+    'wait 5s', 'device ../escape', 'output "unterminated',
+    'device a\ndevice b', 'output a\noutput b', 'output ""',
+    'scan a 1500 1501 step=1pm speed=10\nwait -1s',
+    'scan a 1500 1501 step=1pm speed=10\nwait nans',
+    'scan a 1500 1501 step=1pm speed=10\nwait 5',
+])
+def test_invalid_job_metadata_and_wait(text):
+    with pytest.raises(JobScriptError):
+        parse_job(text)
+
+
+def test_wait_follows_both_directions():
+    job = parse_job('scan a 1500 1501 step=1pm speed=10 dir=both\nwait 2s\nwait 3s')
+    assert [s.wait_after_s for s in job.segments] == [0, 5]

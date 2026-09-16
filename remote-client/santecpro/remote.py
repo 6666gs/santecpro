@@ -17,12 +17,14 @@ Mac 端不需要 pyvisa，只需要 requests 库。
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 import numpy as np
 import requests
 
 from santecpro.results import ScanResult, ILMeasurement
+from santecpro.exceptions import ScanCancelled
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,7 @@ class RemoteScanner:
         self._timeout = timeout
         self._tsl_idn: str = ""
         self._mpm_idn: str = ""
+        self._addresses: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # 连接管理
@@ -67,6 +70,39 @@ class RemoteScanner:
         self._tsl_idn = resp.get("tsl_idn", "")
         self._mpm_idn = resp.get("mpm_idn", "")
         logger.info("Connected: TSL=%s, MPM=%s", self._tsl_idn, self._mpm_idn)
+
+    def set_addresses(self, tsl_address: str = "", mpm_address: str = "") -> None:
+        """Override server defaults for all DLL operations."""
+        self._addresses = {key: value for key, value in {
+            "tsl_address": tsl_address, "mpm_address": mpm_address,
+        }.items() if value}
+
+    def check_instruments(self) -> dict:
+        """Probe DLL loading and instrument identity without enabling output."""
+        data = self._post("/api/dll/check")
+        self._tsl_idn = data["tsl_idn"]
+        self._mpm_idn = data["mpm_idn"]
+        return data
+
+    def prepare_laser(self, timeout: float = 900, progress=None) -> dict:
+        """Initialize once and wait for real LD_ON; never switch output per scan."""
+        deadline = time.monotonic() + timeout
+        while True:
+            state = self._post("/api/dll/laser/prepare")
+            if state["ready"]:
+                if progress:
+                    progress("激光器已就绪，可开始扫描")
+                return state
+            if progress:
+                progress("激光器预热中，等待实际开启…")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Laser warmup timed out; output was not switched off. Reconnect to check again.")
+            time.sleep(min(2.0, remaining))
+
+    def cancel_scan(self) -> dict:
+        """Request cooperative cancellation; completion is reported by scan state."""
+        return self._post("/api/scan/cancel")
 
     def disconnect(self) -> None:
         """断开远程仪器连接。"""
@@ -340,12 +376,20 @@ class RemoteScanner:
     def _post(self, path: str, data: dict | None = None) -> dict:
         """发送 POST 请求到服务器。"""
         url = f"{self._url}{path}"
+        if path.startswith("/api/dll/") or path == "/api/scan/stsprocess":
+            data = {**self._addresses, **(data or {})}
         try:
             resp = requests.post(url, json=data, timeout=self._timeout)
-            resp.raise_for_status()
-            result = resp.json()
+            try:
+                result = resp.json()
+            except ValueError:
+                resp.raise_for_status()
+                raise RuntimeError("Server returned invalid JSON")
+            if result.get("cancelled"):
+                raise ScanCancelled(result.get("error", "Scan cancelled"))
             if "error" in result:
                 raise RuntimeError(f"Server error: {result['error']}")
+            resp.raise_for_status()
             return result
         except requests.exceptions.Timeout:
             raise TimeoutError(f"Request to {url} timed out ({self._timeout}s)")
@@ -369,7 +413,9 @@ class RemoteScanner:
             wavelengths=np.array(data["wavelengths"], dtype=float),
             powers=np.array(data["powers"], dtype=float),
             monitor_powers=np.array(data["monitor_powers"], dtype=float),
-            scan_params=data.get("scan_params", {}),
+            scan_params={**data.get("scan_params", {}), **{
+                key: data[key] for key in ("tsl_idn", "mpm_idn") if data.get(key)
+            }},
             timestamp=data.get("timestamp", ""),
             mpm_range=data.get("mpm_range", 1),
             channel_powers={

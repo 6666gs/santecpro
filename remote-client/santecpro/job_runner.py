@@ -8,14 +8,16 @@ carry swapped start/stop), so the runner just forwards the values.
 
 from __future__ import annotations
 
-import csv
 import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from santecpro.jobscript import JobSpec
+from santecpro.jobscript import JobSpec, Segment
+from santecpro.exceptions import ScanCancelled
+from santecpro.session import ScanSession, ScanRecord
+from santecpro.exporter import save_record_csv
 
 
 @dataclass(frozen=True)
@@ -27,6 +29,16 @@ class SegmentResult:
     points: int
     error: str
     duration_s: float
+    record: ScanRecord | None = None
+
+
+def csv_filename(job: JobSpec, seg: Segment, index: int, kind: str) -> str:
+    """Keep legacy names unless a device name is configured."""
+    if job.device:
+        return (f"{job.device}_{index:02d}_{seg.label}_"
+                f"{seg.start_wl:g}-{seg.stop_wl:g}nm_{seg.step * 1000:g}pm_"
+                f"{seg.speed:g}nms_{seg.direction}_{kind}.csv")
+    return f"{index:02d}_{seg.label}_{seg.direction}_{kind}.csv"
 
 
 def run_job(
@@ -36,7 +48,12 @@ def run_job(
     *,
     timestamp: str,
     keep_going: bool = False,
+    session: ScanSession | None = None,
+    reference_first: bool = False,
+    reference_ready: Callable[[], None] | None = None,
+    save_kind: str = "raw",
     log: Callable[[str], None] = print,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> list[SegmentResult]:
     """Run every segment of *job*, saving CSVs and a manifest under *outdir*.
 
@@ -53,13 +70,23 @@ def run_job(
         One :class:`SegmentResult` per segment that ran (fewer than the job's
         segments if it stopped early on an error).
     """
+    session = session if session is not None else ScanSession()
+    if reference_first and len(job.segments) > 1 and reference_ready is None:
+        raise ValueError("Provide reference_ready to switch the optical path after the reference scan")
+    if save_kind not in ("raw", "loss"):
+        raise ValueError("save_kind must be raw or loss")
+    if save_kind == "loss" and session.reference is None and not reference_first:
+        raise ValueError("Loss export requires a measured reference (reference_first=True)")
     job_dir = Path(outdir) / f"{job.name}_{timestamp}"
-    job_dir.mkdir(parents=True, exist_ok=True)
+    job_dir.mkdir(parents=True, exist_ok=False)  # never overwrite an earlier run
 
     results: list[SegmentResult] = []
     total = len(job.segments)
     for i, seg in enumerate(job.segments, start=1):
-        csv_name = f"{i:02d}_{seg.label}_{seg.direction}.csv"
+        is_reference = reference_first and i == 1
+        kind = "raw" if is_reference else save_kind
+        csv_name = csv_filename(job, seg, i, kind)
+        record = None
         log(
             f"[{i}/{total}] {seg.label} ({seg.direction}) "
             f"{seg.start_wl:g} -> {seg.stop_wl:g} nm  "
@@ -80,43 +107,34 @@ def run_job(
                 plot=False,
                 save_csv=None,
             )
-            points = _write_segment_csv(job_dir / csv_name, result)
+            record = session.add(result, is_reference=is_reference)
+            save_record_csv(record, str(job_dir / csv_name), kind)
+            points = len(record.raw.wavelengths)
             duration = time.monotonic() - started
             log(f"      OK   {points} points -> {csv_name}")
             results.append(
                 SegmentResult(seg.label, seg.direction, True, str(job_dir / csv_name),
-                              points, "", duration)
+                              points, "", duration, record)
             )
         except Exception as exc:  # noqa: BLE001 - report any scan failure per segment
             duration = time.monotonic() - started
             log(f"      FAIL {exc}")
             results.append(
-                SegmentResult(seg.label, seg.direction, False, "", 0, str(exc), duration)
+                SegmentResult(seg.label, seg.direction, False, "", 0, str(exc), duration, record)
             )
-            if not keep_going:
-                log("stopping (pass --keep-going to continue after errors)")
+            if is_reference or not keep_going or isinstance(exc, (ScanCancelled, TimeoutError, ConnectionError)):
+                log("stopping: cancellation/connection uncertainty or stop-on-error policy")
                 break
+        finally:
+            _write_manifest(job_dir / "manifest.json", job, timestamp, results)
+        if is_reference and i < total:
+            reference_ready()
+        if seg.wait_after_s:
+            log(f"      waiting {seg.wait_after_s:g}s (Ctrl+C to stop)")
+            sleep(seg.wait_after_s)
 
     _write_manifest(job_dir / "manifest.json", job, timestamp, results)
     return results
-
-
-def _write_segment_csv(path: Path, result: Any) -> int:
-    channels = result.channels()
-    wavelengths = result.wavelengths
-    monitor = result.monitor_powers
-    per_channel = {c: result.powers_for_channel(c) for c in channels}
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["wavelength_nm", *[f"ch{c}_power_dbm" for c in channels], "monitor_dbm"])
-        for i in range(len(wavelengths)):
-            row: list[Any] = [wavelengths[i]]
-            for c in channels:
-                p = per_channel[c]
-                row.append(p[i] if i < len(p) else "")
-            row.append(monitor[i] if i < len(monitor) else "")
-            writer.writerow(row)
-    return len(wavelengths)
 
 
 def _write_manifest(path: Path, job: JobSpec, timestamp: str, results: list[SegmentResult]) -> None:
@@ -133,12 +151,18 @@ def _write_manifest(path: Path, job: JobSpec, timestamp: str, results: list[Segm
             "mpm_range": seg.mpm_range,
             "channels": list(seg.mpm_channels),
             "averaging_ms": seg.mpm_averaging_time_ms,
+            "wait_after_s": seg.wait_after_s,
             "csv": Path(res.csv_path).name if res.csv_path else None,
             "points": res.points,
             "ok": res.ok,
             "error": res.error,
             "duration_s": round(res.duration_s, 3),
+            "is_reference": bool(res.record and res.record.is_reference),
+            "reference_index": res.record.reference_index if res.record else None,
+            "loss_available": bool(res.record and res.record.loss),
+            "loss_error": res.record.loss_error if res.record else "",
+            "loss_convention": "reference_dbm - measurement_dbm",
         })
-    manifest = {"job": job.name, "timestamp": timestamp, "segments": entries}
+    manifest = {"job": job.name, "device": job.device, "timestamp": timestamp, "segments": entries}
     with path.open("w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False)

@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import csv
-import time
+import math
+import logging
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from santecpro.sweep_rules import validate_sts_sweep_params
 
-from .instruments import DllMpm, DllStsProcess, DllTsl
+from .instruments import DllMpm, DllStsProcess, DllTsl, check_cancelled
 
 
 @dataclass(frozen=True)
@@ -57,6 +59,7 @@ def run_stsprocess_scan(
     tsl: Any | None = None,
     mpm: Any | None = None,
     sts: Any | None = None,
+    cancel_event=None,
 ) -> STSScanResult:
     """Run one DLL-backed STSProcess scan and return rescaled target data."""
     validate_sts_sweep_params(
@@ -65,8 +68,14 @@ def run_stsprocess_scan(
         settings.step,
         settings.speed,
     )
-    owns_tsl = tsl is None
-    owns_mpm = mpm is None
+    channels = _selected_channels(settings)
+    if not math.isfinite(settings.power):
+        raise ValueError("power must be finite")
+    if not math.isfinite(settings.mpm_averaging_time_ms) or settings.mpm_averaging_time_ms <= 0:
+        raise ValueError("averaging time must be positive and finite")
+    if settings.mpm_range not in range(1, 6) or settings.mpm_module not in range(5):
+        raise ValueError("MPM range must be 1-5 and module must be 0-4")
+    check_cancelled(cancel_event)
     tsl = tsl or DllTsl(settings.tsl_resource)
     mpm = mpm or DllMpm(settings.mpm_resource)
     sts = sts or DllStsProcess()
@@ -79,13 +88,17 @@ def run_stsprocess_scan(
     tsl_idn = ""
     mpm_idn = ""
 
+    tsl_connected = mpm_connected = False
     try:
         tsl.connect()
+        tsl_connected = True
         tsl_idn = tsl.idn()
+        if not tsl.laser_is_on():
+            raise RuntimeError("Laser is not ready. Initialize and wait for warmup before scanning.")
         mpm.connect()
+        mpm_connected = True
         mpm_idn = mpm.idn()
         tsl.set_power_dbm(settings.power)
-        channels = _selected_channels(settings)
         for channel in channels:
             mpm.configure_power_logging(settings.mpm_module, channel, settings.mpm_range)
 
@@ -95,6 +108,8 @@ def run_stsprocess_scan(
             settings.speed,
             settings.step,
         )
+        if not math.isfinite(actual_step) or actual_step <= 0:
+            raise RuntimeError("TSL returned an invalid trigger step")
         sts.make_wavelength_tables(
             settings.start_wl,
             settings.stop_wl,
@@ -113,40 +128,65 @@ def run_stsprocess_scan(
 
         tsl.set_continuous_oneway_sweep_mode()
         tsl.set_waiting_for_trigger_start_mode()
-        mpm.start_logging()
-        tsl.start_sweep()
+        check_cancelled(cancel_event)
         try:
-            tsl.wait_for_status(3000, "waiting_for_trigger")
+            mpm.start_logging()
+            tsl.start_sweep()
+            tsl.wait_for_status(3000, "waiting_for_trigger", cancel_event=cancel_event)
             tsl.soft_trigger()
             wait_ms = int(abs(settings.stop_wl - settings.start_wl) / settings.speed * 1100)
-            tsl.wait_for_status(max(wait_ms, 5000), "standby")
-            _status, completed_points = mpm.wait_for_log_completion()
+            tsl.wait_for_status(max(wait_ms, 5000), "standby", cancel_event=cancel_event)
+            _status, completed_points = mpm.wait_for_log_completion(
+                expected_points=mpm_expected, cancel_event=cancel_event
+            )
         finally:
-            mpm.stop_logging(raise_on_error=False)
-            tsl.stop_sweep(raise_on_error=False)
+            _cleanup([
+                lambda: mpm.stop_logging(), lambda: tsl.stop_sweep(),
+            ])
 
+        check_cancelled(cancel_event)
+        if completed_points != mpm_expected or completed_points <= 0:
+            raise RuntimeError(f"Incomplete MPM acquisition: expected {mpm_expected}, got {completed_points}")
         first_channel = channels[0]
         first_raw_powers = mpm.get_channel_log_data(settings.mpm_module, first_channel)
-        trigger, monitor = _read_auxiliary_data_or_synthesize(
-            tsl, mpm, settings, actual_step, first_raw_powers
-        )
+        trigger, monitor = _read_auxiliary_data(tsl, mpm, settings, actual_step)
         sts.set_tsl_monitor_rescaling(settings.mpm_averaging_time_ms)
         wavelengths: list[float] = []
         rescaled_monitor: list[float] = []
         raw_count = len(first_raw_powers)
+        first_wavelengths = None
         for channel in channels:
+            check_cancelled(cancel_event)
             raw_powers = (
                 first_raw_powers
                 if channel == first_channel
                 else mpm.get_channel_log_data(settings.mpm_module, channel)
             )
+            _validate_values(raw_powers, f"CH{channel} raw powers")
+            if len(raw_powers) != completed_points:
+                raise RuntimeError(f"CH{channel} raw point count does not match completed acquisition")
             raw_count = max(raw_count, len(raw_powers))
             data_struct = sts.make_data_struct(settings.mpm_module, channel, settings.mpm_range)
             sts.add_reference_data(raw_powers, trigger, monitor, data_struct)
             wavelengths, rescaled_powers, rescaled_monitor = sts.rescale_reference(data_struct)
+            _validate_values(wavelengths, "wavelengths")
+            _validate_values(rescaled_powers, f"CH{channel} rescaled powers")
+            _validate_values(rescaled_monitor, "rescaled monitor")
+            expected = expected_points(settings.start_wl, settings.stop_wl, settings.step)
+            if not (len(wavelengths) == len(rescaled_powers) == len(rescaled_monitor) == expected):
+                raise RuntimeError("Rescaled data lengths do not match requested wavelength grid")
+            direction = 1 if settings.stop_wl > settings.start_wl else -1
+            if any((b - a) * direction <= 0 for a, b in zip(wavelengths, wavelengths[1:])):
+                raise RuntimeError("Wavelength order does not match scan direction")
+            if abs(wavelengths[0] - settings.start_wl) > settings.step / 2 or abs(wavelengths[-1] - settings.stop_wl) > settings.step / 2 + 1e-8:
+                raise RuntimeError("Returned wavelength span does not match requested span")
+            if first_wavelengths is not None and wavelengths != first_wavelengths:
+                raise RuntimeError("Channel wavelength grids do not match")
+            first_wavelengths = list(wavelengths)
             channel_powers[int(channel)] = rescaled_powers
         powers = channel_powers[first_channel]
 
+        check_cancelled(cancel_event)
         csv_path = _write_csv(settings.csv_path, wavelengths, channel_powers, rescaled_monitor)
         return STSScanResult(
             wavelengths=wavelengths,
@@ -164,28 +204,56 @@ def run_stsprocess_scan(
             mpm_idn=mpm_idn,
         )
     finally:
+        actions = []
+        if mpm_connected:
+            actions.append(mpm.disconnect)
+        if tsl_connected:
+            actions.append(tsl.disconnect)
+        _cleanup(actions)
+
+
+def _cleanup(actions):
+    """Attempt every cleanup action, preserving the original scan exception."""
+    active_error = sys.exc_info()[0] is not None
+    errors = []
+    for action in actions:
         try:
-            mpm.disconnect()
-        finally:
-            tsl.disconnect()
+            action()
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Instrument cleanup failed")
+            errors.append(exc)
+    if errors and not active_error:
+        raise RuntimeError(f"Instrument cleanup failed: {errors}") from errors[0]
 
 
-def _read_auxiliary_data_or_synthesize(
+def _validate_values(values, label):
+    if not values or not all(math.isfinite(float(value)) for value in values):
+        raise RuntimeError(f"Missing or non-finite {label}")
+
+
+def _read_auxiliary_data(
     tsl: Any,
     mpm: Any,
     settings: STSScanSettings,
     actual_step: float,
-    powers: list[float],
 ) -> tuple[list[float], list[float]]:
     try:
         trigger = mpm.get_trigger_data(settings.mpm_module)
         monitor = tsl.get_sts_power_monitor_data(settings.speed, actual_step)
+        _validate_values(trigger, "trigger data")
+        _validate_values(monitor, "TSL monitor data")
         return trigger, monitor
-    except Exception:
+    except Exception as primary_error:
         try:
-            return mpm.get_216_monitor_data(settings.mpm_module)
-        except Exception:
-            return [float(i) for i in range(len(powers))], [0.0] * len(powers)
+            trigger, monitor = mpm.get_216_monitor_data(settings.mpm_module)
+            _validate_values(trigger, "MPM trigger data")
+            _validate_values(monitor, "MPM monitor data")
+            return trigger, monitor
+        except Exception as fallback_error:
+            raise RuntimeError(
+                f"Cannot obtain measured trigger/monitor data; refusing synthetic data. "
+                f"Primary: {primary_error}; fallback: {fallback_error}"
+            ) from fallback_error
 
 
 def _selected_channels(settings: STSScanSettings) -> tuple[int, ...]:

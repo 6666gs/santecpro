@@ -156,3 +156,50 @@ class TestSaveLossCsv:
             # Second row
             second_row = rows[data_start + 1]
             assert float(second_row[1]) == pytest.approx(7.0)
+
+
+def test_official_sample_column_layout_and_precision(tmp_path):
+    from santecpro.session import ScanSession
+    from santecpro.exporter import save_record_csv
+    session = ScanSession()
+    reference = _make_scan_result()
+    reference.scan_params['mpm_averaging_time_ms'] = .05
+    session.add(reference, is_reference=True)
+    measurement = _make_scan_result()
+    measurement.powers -= 7
+    measurement.scan_params['mpm_averaging_time_ms'] = .05
+    record = session.add(measurement)
+    raw, loss = tmp_path / 'raw.csv', tmp_path / 'loss.csv'
+    save_record_csv(record, raw, 'raw')
+    save_record_csv(record, loss, 'loss')
+    raw_rows, loss_rows = _read_csv_rows(raw), _read_csv_rows(loss)
+    assert raw_rows[14] == ['Wavelength(nm)', 'Monitor-R1(dBm)', 'Raw_M1-Ch1-R1(dBm)', '', '']
+    assert loss_rows[14] == ['Wavelength(nm)', 'IL_M1_CH1', '', '', '']
+    assert raw_rows[15] == ['1500.00000', '7.58000', '-40.26800', '', '']
+    assert loss_rows[15] == ['1500.00000000', '7.00000000', '', '', '']
+    assert raw_rows[11] == ['Averaging Time', '0.000050', 's', '', '']
+    assert raw_rows[13][0] == 'TSL PM- range'
+    assert raw_rows[5][0] == 'PowerMonitor'
+    assert raw_rows[0][0] == '2026/4/13'
+    assert b'\r\n' in raw.read_bytes()
+
+
+def test_multi_channel_export_does_not_mislabel_channel_or_module(tmp_path):
+    scan = _make_scan_result()
+    scan.scan_params['mpm_module'] = 1  # zero-based DLL slot
+    scan.channel_powers = {2: scan.powers, 4: scan.powers - 3}
+    path = tmp_path / 'raw.csv'
+    save_raw_csv(scan, TSL_IDN, MPM_IDN, path)
+    rows = _read_csv_rows(path)
+    assert rows[14] == ['Wavelength(nm)', 'Monitor-R1(dBm)', 'Raw_M2-Ch2-R1(dBm)', 'Raw_M2-Ch4-R1(dBm)', '', '']
+    assert len(rows) == 18
+
+
+def test_mismatched_raw_lengths_rejected_before_overwriting(tmp_path):
+    path = tmp_path / 'raw.csv'
+    path.write_text('existing')
+    scan = _make_scan_result()
+    scan.monitor_powers = np.array([7])
+    with pytest.raises(ValueError, match='mismatched'):
+        save_raw_csv(scan, TSL_IDN, MPM_IDN, path)
+    assert path.read_text() == 'existing'

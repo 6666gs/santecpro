@@ -19,6 +19,7 @@ import logging
 import os
 import threading
 import time
+from functools import wraps
 from flask import Flask, request, jsonify
 
 try:
@@ -31,7 +32,7 @@ except Exception:  # DLL/STSProcess server mode does not require pyvisa.
     TSLInstrument = MPMInstrument = Scanner = None
 
 import config
-from santec_dll_backend.instruments import DllMpm, DllTsl
+from santec_dll_backend.instruments import DllMpm, DllTsl, ScanCancelled
 from santec_dll_backend.scanner import run_stsprocess_scan
 from stsprocess_api import build_sts_scan_settings, sts_scan_result_to_dict
 
@@ -61,6 +62,23 @@ scanner: Scanner | None = None
 tsl_idn: str | None = None
 mpm_idn: str | None = None
 instrument_lock = threading.RLock()
+state_lock = threading.RLock()
+scan_cancel = threading.Event()
+laser_start_requests: set[str] = set()
+
+
+def exclusive_instruments(func):
+    """Reject competing requests instead of queuing commands behind a scan."""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if not instrument_lock.acquire(blocking=False):
+            return jsonify({"error": "Instruments are busy."}), 409
+        try:
+            return func(*args, **kwargs)
+        finally:
+            instrument_lock.release()
+    return wrapper
+
 scan_state: dict = {
     "running": False,
     "phase": "idle",
@@ -96,7 +114,8 @@ def _scan_result_to_dict(result) -> dict:
 
 
 def _set_scan_state(**updates) -> None:
-    scan_state.update(updates)
+    with state_lock:
+        scan_state.update(updates)
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +156,7 @@ def get_logs():
 
 
 @app.route("/api/connect", methods=["POST"])
+@exclusive_instruments
 def connect():
     """连接 TSL 和 MPM 仪器。"""
     global rm, tsl, mpm, scanner, tsl_idn, mpm_idn
@@ -145,8 +165,8 @@ def connect():
         return jsonify({"error": "pyvisa SCPI backend is not available on this server."}), 500
 
     data = request.get_json(silent=True) or {}
-    tsl_addr = data.get("tsl_address", "GPIB3::1::INSTR")
-    mpm_addr = data.get("mpm_address", "GPIB0::16::INSTR")
+    tsl_addr = data.get("tsl_address") or config.TSL_ADDRESS
+    mpm_addr = data.get("mpm_address") or config.MPM_ADDRESS
 
     try:
         with instrument_lock:
@@ -174,6 +194,7 @@ def connect():
 
 
 @app.route("/api/disconnect", methods=["POST"])
+@exclusive_instruments
 def disconnect():
     """断开仪器连接。"""
     global rm, tsl, mpm, scanner, tsl_idn, mpm_idn
@@ -193,6 +214,7 @@ def disconnect():
 
 
 @app.route("/api/idn", methods=["GET"])
+@exclusive_instruments
 def idn():
     """获取仪器识别信息。"""
     err = _require_connected()
@@ -205,6 +227,7 @@ def idn():
 
 
 @app.route("/api/configure", methods=["POST"])
+@exclusive_instruments
 def configure():
     """配置扫描参数。"""
     err = _require_connected()
@@ -235,6 +258,7 @@ def configure():
 
 
 @app.route("/api/scan/single", methods=["POST"])
+@exclusive_instruments
 def scan_single():
     """执行单次扫描并返回数据。"""
     err = _require_connected()
@@ -277,6 +301,7 @@ def scan_single():
 
 
 @app.route("/api/scan/stsprocess", methods=["POST"])
+@exclusive_instruments
 def scan_stsprocess():
     """执行 DLL/STSProcess 扫描并返回重采样后的目标点表。"""
     data = request.get_json() or {}
@@ -285,6 +310,7 @@ def scan_stsprocess():
             if scan_state.get("running"):
                 return jsonify({"error": "A scan is already running."}), 409
             settings = build_sts_scan_settings(data, BASE_DIR)
+            scan_cancel.clear()
             _set_scan_state(
                 running=True,
                 phase="stsprocess_running",
@@ -295,7 +321,7 @@ def scan_stsprocess():
                 params=data,
             )
             logger.info("STSProcess scan request: %s", data)
-            result = run_stsprocess_scan(settings)
+            result = run_stsprocess_scan(settings, cancel_event=scan_cancel)
             _set_scan_state(
                 running=False,
                 phase="completed",
@@ -311,11 +337,15 @@ def scan_stsprocess():
             finished_at=time.strftime("%Y-%m-%d %H:%M:%S"),
             last_error=str(e),
         )
+        if isinstance(e, ScanCancelled):
+            _set_scan_state(phase="cancelled")
+            return jsonify({"error": str(e), "cancelled": True}), 409
         logger.exception("STSProcess scan failed")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(e)}), 400 if isinstance(e, (ValueError, KeyError)) else 500
 
 
 @app.route("/api/scan/reference", methods=["POST"])
+@exclusive_instruments
 def scan_reference():
     """执行参考扫描。"""
     err = _require_connected()
@@ -334,6 +364,7 @@ def scan_reference():
 
 
 @app.route("/api/scan/multi_range", methods=["POST"])
+@exclusive_instruments
 def scan_multi_range():
     """执行多 range 扫描并返回合并结果。"""
     err = _require_connected()
@@ -352,6 +383,7 @@ def scan_multi_range():
 
 
 @app.route("/api/scan/il", methods=["POST"])
+@exclusive_instruments
 def scan_il():
     """执行完整 IL 测量（参考扫描 + 多 range 测量扫描）。"""
     err = _require_connected()
@@ -375,6 +407,7 @@ def scan_il():
 
 
 @app.route("/api/tsl/command", methods=["POST"])
+@exclusive_instruments
 def tsl_command():
     """直接发送 SCPI 命令到 TSL（用于调试）。"""
     err = _require_connected()
@@ -398,6 +431,7 @@ def tsl_command():
 
 
 @app.route("/api/mpm/command", methods=["POST"])
+@exclusive_instruments
 def mpm_command():
     """直接发送 SCPI 命令到 MPM（用于调试）。"""
     err = _require_connected()
@@ -421,6 +455,7 @@ def mpm_command():
 
 
 @app.route("/api/mpm/data", methods=["POST"])
+@exclusive_instruments
 def mpm_data():
     """读取 MPM 测量数据（LOGG? 二进制格式，转为 JSON 列表）。"""
     err = _require_connected()
@@ -441,6 +476,7 @@ def mpm_data():
 
 
 @app.route("/api/laser/on", methods=["POST"])
+@exclusive_instruments
 def laser_on():
     """开启激光器和快门。"""
     err = _require_connected()
@@ -453,6 +489,7 @@ def laser_on():
 
 
 @app.route("/api/laser/off", methods=["POST"])
+@exclusive_instruments
 def laser_off():
     """关闭激光器和快门。"""
     err = _require_connected()
@@ -464,38 +501,86 @@ def laser_off():
     return jsonify({"status": "ok"})
 
 
-@app.route("/api/dll/laser/on", methods=["POST"])
-def dll_laser_on():
-    """通过官方 DLL 开启激光器和快门。"""
+@app.route("/api/scan/cancel", methods=["POST"])
+def cancel_scan():
+    with state_lock:
+        if not scan_state["running"] or scan_state["phase"] not in ("stsprocess_running", "cancelling"):
+            return jsonify({"status": "idle", "requested": False})
+        scan_cancel.set()
+        scan_state["phase"] = "cancelling"
+        return jsonify({"status": "cancelling", "requested": True}), 202
+
+
+@app.route("/api/dll/check", methods=["POST"])
+@exclusive_instruments
+def dll_check():
+    """Read instrument identity via DLL without changing laser output."""
+    global tsl_idn, mpm_idn
     data = request.get_json(silent=True) or {}
-    tsl_addr = data.get("tsl_address", "GPIB3::1::INSTR")
+    laser = meter = None
     try:
-        with instrument_lock:
-            laser = DllTsl(tsl_addr)
-            try:
-                laser.connect()
-                laser.laser_on()
-                laser.shutter_open()
-            finally:
+        laser = DllTsl(data.get("tsl_address") or config.TSL_ADDRESS)
+        meter = DllMpm(data.get("mpm_address") or config.MPM_ADDRESS)
+        laser.connect()
+        meter.connect()
+        tsl_idn, mpm_idn = laser.idn(), meter.idn()
+        return jsonify({"status": "ok", "tsl_idn": tsl_idn, "mpm_idn": mpm_idn,
+                        "laser_ready": laser.laser_is_on()})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+    finally:
+        try:
+            if meter is not None:
+                meter.disconnect()
+        finally:
+            if laser is not None:
                 laser.disconnect()
-        return jsonify({"status": "ok"})
-    except Exception as e:
-        logger.exception("DLL laser on failed")
-        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/dll/laser/prepare", methods=["POST"])
+@app.route("/api/dll/laser/on", methods=["POST"])
+@exclusive_instruments
+def dll_laser_on():
+    """Start LD once, poll actual readiness, and open shutter only when ready."""
+    data = request.get_json(silent=True) or {}
+    address = data.get("tsl_address") or config.TSL_ADDRESS
+    laser = None
+    try:
+        laser = DllTsl(address)
+        laser.connect()
+        ready = laser.laser_is_on()
+        if not ready and address not in laser_start_requests:
+            laser.laser_on()
+            laser_start_requests.add(address)
+            ready = laser.laser_is_on()
+        if ready:
+            laser_start_requests.discard(address)
+            laser.shutter_open()
+        return jsonify({"ready": ready, "status": "ready" if ready else "warming_up"})
+    except Exception as exc:
+        logger.exception("Laser initialization failed")
+        return jsonify({"error": str(exc)}), 500
+    finally:
+        if laser is not None:
+            laser.disconnect()
 
 
 @app.route("/api/dll/laser/off", methods=["POST"])
+@exclusive_instruments
 def dll_laser_off():
     """通过官方 DLL 关闭快门和激光器。"""
     data = request.get_json(silent=True) or {}
-    tsl_addr = data.get("tsl_address", "GPIB3::1::INSTR")
+    tsl_addr = data.get("tsl_address") or config.TSL_ADDRESS
     try:
         with instrument_lock:
             laser = DllTsl(tsl_addr)
             try:
                 laser.connect()
-                laser.shutter_close()
-                laser.laser_off()
+                try:
+                    laser.shutter_close()
+                finally:
+                    laser.laser_off()
+                laser_start_requests.discard(tsl_addr)
             finally:
                 laser.disconnect()
         return jsonify({"status": "ok"})
@@ -505,11 +590,12 @@ def dll_laser_off():
 
 
 @app.route("/api/dll/alignment/start", methods=["POST"])
+@exclusive_instruments
 def dll_alignment_start():
     """Set fixed laser output and return selected MPM channel powers."""
     data = request.get_json(silent=True) or {}
-    tsl_addr = data.get("tsl_address", "GPIB3::1::INSTR")
-    mpm_addr = data.get("mpm_address", "GPIB0::16::INSTR")
+    tsl_addr = data.get("tsl_address") or config.TSL_ADDRESS
+    mpm_addr = data.get("mpm_address") or config.MPM_ADDRESS
     module = int(data.get("mpm_module", 0))
     channels = [int(ch) for ch in data.get("mpm_channels", [1])]
     mpm_range = int(data.get("mpm_range", 1))
@@ -521,9 +607,9 @@ def dll_alignment_start():
             try:
                 laser.connect()
                 meter.connect()
+                if not laser.laser_is_on():
+                    raise RuntimeError("Laser is not ready; initialize and wait for warmup first.")
                 laser.set_power_dbm(power)
-                laser.laser_on()
-                laser.shutter_open()
                 for channel in channels:
                     meter.configure_power_logging(module, channel, mpm_range)
                 powers = meter.read_power_channels(module, channels)
@@ -539,10 +625,11 @@ def dll_alignment_start():
 
 
 @app.route("/api/dll/mpm/powers", methods=["POST"])
+@exclusive_instruments
 def dll_mpm_powers():
     """Read selected MPM channel powers through the official DLL."""
     data = request.get_json(silent=True) or {}
-    mpm_addr = data.get("mpm_address", "GPIB0::16::INSTR")
+    mpm_addr = data.get("mpm_address") or config.MPM_ADDRESS
     module = int(data.get("mpm_module", 0))
     channels = [int(ch) for ch in data.get("mpm_channels", [1])]
     try:
@@ -570,6 +657,9 @@ if __name__ == "__main__":
     parser.add_argument("--tsl", default=config.TSL_ADDRESS, help="TSL GPIB 地址")
     parser.add_argument("--mpm", default=config.MPM_ADDRESS, help="MPM GPIB 地址")
     args = parser.parse_args()
+
+    config.TSL_ADDRESS = args.tsl
+    config.MPM_ADDRESS = args.mpm
 
     logger.info("Starting Santec instrument server on %s:%d", args.host, args.port)
     logger.info("TSL address: %s", args.tsl)

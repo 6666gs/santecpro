@@ -3,8 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 
 from .loader import load_santec_dlls
+
+
+from santecpro.exceptions import ScanCancelled
+
+
+def check_cancelled(cancel_event=None):
+    if cancel_event is not None and cancel_event.is_set():
+        raise ScanCancelled("Scan cancelled")
 
 
 @dataclass(frozen=True)
@@ -91,6 +100,12 @@ class DllTsl:
             "TSL Set_LD_Status ON",
         )
 
+    def laser_is_on(self) -> bool:
+        """Read actual LD state; setting LD_ON alone does not mean warmup finished."""
+        code, status = self._tsl.Get_LD_Status(self._tsl.LD_Status.LD_OFF)
+        raise_if_error(code, "TSL Get_LD_Status")
+        return status == self._tsl.LD_Status.LD_ON
+
     def laser_off(self) -> None:
         raise_if_error(
             self._tsl.Set_LD_Status(self._tsl.LD_Status.LD_OFF),
@@ -141,7 +156,7 @@ class DllTsl:
     def soft_trigger(self) -> None:
         raise_if_error(self._tsl.Set_Software_Trigger(), "TSL Set_Software_Trigger")
 
-    def wait_for_status(self, timeout_ms: int, status_name: str) -> None:
+    def wait_for_status(self, timeout_ms: int, status_name: str, cancel_event=None) -> None:
         statuses = {
             "standby": self._tsl.Sweep_Status.Standby,
             "running": self._tsl.Sweep_Status.Running,
@@ -149,10 +164,19 @@ class DllTsl:
             "waiting_for_trigger": self._tsl.Sweep_Status.WaitingforTrigger,
             "returning": self._tsl.Sweep_Status.Returning,
         }
-        raise_if_error(
-            self._tsl.Waiting_For_Sweep_Status(timeout_ms, statuses[status_name]),
-            f"TSL wait_for_status {status_name}",
-        )
+        deadline = time.monotonic() + timeout_ms / 1000
+        while True:
+            check_cancelled(cancel_event)
+            code, status = self._tsl.Get_Sweep_Status(self._tsl.Sweep_Status.Standby)
+            raise_if_error(code, "TSL Get_Sweep_Status")
+            if status == statuses[status_name]:
+                return
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"TSL did not reach {status_name} within {timeout_ms} ms")
+            if cancel_event is not None:
+                cancel_event.wait(0.05)
+            else:
+                time.sleep(0.05)
 
     def get_sts_power_monitor_data(
         self, speed_nm_s: float, actual_step_nm: float
@@ -248,13 +272,22 @@ class DllMpm:
         if raise_on_error:
             raise_if_error(code, "MPM Logging_Stop")
 
-    def wait_for_log_completion(self) -> tuple[int, int]:
-        code, status, logging_point = self._mpm.Get_Logging_Status(0, 0)
-        if int(code) == -999:
-            raise RuntimeError("MPM trigger error; check trigger cable connection.")
-        if int(code) != 0 and int(status) != -1:
+    def wait_for_log_completion(self, expected_points=None, timeout_s=10, cancel_event=None) -> tuple[int, int]:
+        deadline = time.monotonic() + timeout_s
+        while True:
+            check_cancelled(cancel_event)
+            code, status, logging_point = self._mpm.Get_Logging_Status(0, 0)
+            if int(code) == -999:
+                raise RuntimeError("MPM trigger error; check trigger cable connection.")
             raise_if_error(code, "MPM Get_Logging_Status")
-        return int(status), int(logging_point)
+            if expected_points is None or int(logging_point) >= expected_points:
+                return int(status), int(logging_point)
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"Incomplete MPM logging: {logging_point}/{expected_points} points")
+            if cancel_event is not None:
+                cancel_event.wait(0.05)
+            else:
+                time.sleep(0.05)
 
     def get_logging_data_point(self) -> int:
         code, count = self._mpm.Get_Logging_Data_Point(0)

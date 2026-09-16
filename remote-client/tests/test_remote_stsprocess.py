@@ -76,3 +76,42 @@ def test_remote_laser_controls_use_dll_routes(monkeypatch):
 
     assert post.call_args_list[0].args[0] == "http://192.168.100.103:5000/api/dll/laser/on"
     assert post.call_args_list[1].args[0] == "http://192.168.100.103:5000/api/dll/laser/off"
+
+
+def test_warmup_polls_until_ready_without_turning_off(monkeypatch):
+    scanner = RemoteScanner('http://test')
+    scanner._post = MagicMock(side_effect=[{'ready': False}, {'ready': False}, {'ready': True}])
+    monkeypatch.setattr('santecpro.remote.time.sleep', lambda _: None)
+    progress = MagicMock()
+    assert scanner.prepare_laser(progress=progress)['ready']
+    assert [c.args[0] for c in scanner._post.call_args_list] == ['/api/dll/laser/prepare'] * 3
+    assert progress.call_count == 3
+
+
+def test_warmup_timeout_never_turns_off(monkeypatch):
+    import pytest
+    scanner = RemoteScanner('http://test')
+    scanner._post = MagicMock(return_value={'ready': False})
+    with pytest.raises(TimeoutError, match='not switched off'):
+        scanner.prepare_laser(timeout=0)
+    scanner._post.assert_called_once_with('/api/dll/laser/prepare')
+
+
+def test_addresses_propagate_to_scan_and_laser(monkeypatch):
+    post = MagicMock()
+    post.return_value.json.return_value = {'status': 'ok'}
+    monkeypatch.setattr('santecpro.remote.requests.post', post)
+    scanner = RemoteScanner('http://test')
+    scanner.set_addresses('GPIB2::3::INSTR', 'GPIB2::4::INSTR')
+    for path in ['/api/dll/laser/on', '/api/dll/check', '/api/scan/stsprocess']:
+        scanner._post(path, {'power': 1})
+        assert post.call_args.kwargs['json'] == {'power': 1, 'tsl_address':'GPIB2::3::INSTR', 'mpm_address':'GPIB2::4::INSTR'}
+
+
+def test_http_error_retains_instrument_message(monkeypatch):
+    import pytest
+    post = MagicMock()
+    post.return_value.json.return_value = {'error': 'Missing measured trigger data'}
+    monkeypatch.setattr('santecpro.remote.requests.post', post)
+    with pytest.raises(RuntimeError, match='Missing measured trigger data'):
+        RemoteScanner('http://test').laser_on()

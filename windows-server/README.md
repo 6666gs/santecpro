@@ -66,6 +66,8 @@ python server.py --host 0.0.0.0 --port 5000 --tsl GPIB3::1::INSTR --mpm GPIB0::1
 
 浏览器或控制端访问 `http://<IP>:5000/api/status` 应返回 JSON(含 `tsl_idn` / `mpm_idn`)。
 
+详见 [当前使用说明与硬件验收](../docs/USAGE_AND_VALIDATION.md)。`POST /api/dll/check` 检查真实仪器，`POST /api/dll/laser/prepare` 初始化激光并报告预热状态，`POST /api/scan/cancel` 请求取消扫描而不关光。
+
 ## 7. 主要 HTTP 接口
 
 | 方法 & 路径 | 用途 |
@@ -87,8 +89,8 @@ windows-server/
 ├── santec_dll_backend/     pythonnet 加载 DLL、执行扫描(核心)
 ├── santecpro/              SCPI 备用驱动子集(instruments/·scanner 等)
 ├── diagnostics/            诊断脚本(可单独运行,不经 Flask)
-├── vendor/santec_dll/      DLL(需手动放入,已 gitignore)
-├── tests/                  pytest(DLL 用例在非 Windows 上自动跳过)
+├── vendor/santec_dll/      DLL(已随仓库提供)
+├── tests/                  pytest(仪器使用模拟对象)
 └── requirements.txt
 ```
 

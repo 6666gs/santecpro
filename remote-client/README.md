@@ -36,15 +36,18 @@ pip install -r requirements.txt
 
 **A. 图形界面(推荐)**
 ```bash
-python run_ui.py
+python run_ui.py                  # 默认最大化
+python run_ui.py --fullscreen     # 直接全屏
+python run_ui.py --preview        # 不连接仪器，仅预览界面
 ```
-界面里确认服务器 URL → 填扫描参数 → 点“连接” → “扫描”。
+启动后自动连接并检查激光状态；未开光时只开启一次，后台等待实际 LD_ON。就绪后填扫描参数并扫描。扫描结束或取消不关光；只有手动 Laser OFF 关光。地址修改后需重新连接。详见 [当前使用说明](../docs/USAGE_AND_VALIDATION.md)。
 
 **B. Python API(脚本/集成)**
 ```python
 from santecpro import RemoteScanner
 sc = RemoteScanner("http://192.168.100.103:5000")
-print(sc.status())
+print(sc.check_instruments())
+sc.prepare_laser(progress=print)  # 初始化一次，等待实际预热完成
 result = sc.run_stsprocess_scan(start_wl=1550, stop_wl=1560, step=0.01, speed=20, power=0)
 ```
 
@@ -65,9 +68,12 @@ python run_job.py jobs/example.scan             # 逐段自动扫并保存
 
 用一个文本脚本描述一次任务:多段扫描、不同范围、可双向(先蓝→红再红→蓝)。系统解析后逐段执行,每段存一个 CSV,并写 `manifest.json`。
 
-**语法**(一行一条,`#` 为注释):
+**语法**(一行一条；注释放在独立一行，以 `#` 开头；下列行尾说明仅供阅读):
 ```text
 job <名字>                          # 可选,命名输出文件夹
+device "器件名字"                    # 可选,自动加入文件名
+output "~/Measurements/santec"       # 可选,Mac 本地保存路径
+wait 5s                             # 放在 scan 后面,保存后等待
 set k=v ...                         # 可选默认:power range channels averaging
 scan <标签> <start> <stop> step=<v>{pm|nm} speed=<v> [power= range= channels= averaging= dir=]
 ```
@@ -90,12 +96,41 @@ python run_job.py my_job.scan --dry-run                          # 解析+校验
 python run_job.py my_job.scan --outdir ./scan_results --keep-going
 ```
 - 遇错默认**停**;`--keep-going` 继续后续段。
-- 输出:`scan_results/<job名>_<时间戳>/` 下每段一个 `NN_<标签>_<fwd|rev>.csv` + `manifest.json`(记录每段参数/方向/点数/成败/耗时)。
+- 未设置 `device` 时保留原文件名。输出:`scan_results/<job名>_<时间戳>/` 下每段一个 `NN_<标签>_<fwd|rev>_<raw|loss>.csv` + `manifest.json`(记录每段参数/方向/点数/成败/耗时)。
+
+### 器件宽谱 + 精细扫描
+
+直接修改 [jobs/device_two_pass.scan](jobs/device_two_pass.scan)：
+
+```text
+job two_pass
+device "device_001"
+output "~/Measurements/santec"
+set power=0 range=1 channels=1 averaging=0.01
+scan wide 1500 1630 step=1pm speed=20
+wait 5s
+scan fine 1545 1555 step=0.1pm speed=1
+```
+
+在 `remote-client` 目录、已安装客户端依赖的 Python 环境中运行：
+
+```bash
+python run_job.py jobs/device_two_pass.scan --dry-run
+python run_job.py jobs/device_two_pass.scan --url http://WINDOWS_IP:5000
+```
+
+- `--dry-run` 只显示参数、文件名、等待时间和保存目录，不连接仪器。
+- `output` 是 **Mac 本地目录**，支持 `~` 和带空格的引号路径；相对路径以 `.scan` 文件所在目录为基准。`--outdir` 优先覆盖它；两者都省略时用当前工作目录的 `scan_results`。
+- 每次生成 `two_pass_<时间戳含微秒>/` 独立目录，不覆盖已有运行。示例文件名：`device_001_01_wide_1500-1630nm_1pm_20nms_fwd_raw.csv`、`device_001_02_fine_1545-1555nm_0.1pm_1nms_fwd_raw.csv`。`nms` 表示 nm/s，全部参数另存于 `manifest.json`。
+- `wait 5s` 从前一段 CSV 和 manifest 写入完成后计时；不是从开始扫描计时。`dir=both` 后的等待发生在正反两次扫描都完成后；末尾的 wait 也会执行。默认扫描或保存失败就停止；显式 `--keep-going` 后可恢复的失败也会等待再继续。
+- Ctrl+C 可中断等待、阻止下一段扫描；已经保存的文件保留。启动时检查并等待激光器就绪，扫描间隔与任务结束不关光。
+- 默认保存 Raw。命令行任务与 GUI 内存会话独立，**不自动沿用 GUI reference**。需要 Loss 时，在脚本最前面额外加一段覆盖后续波长范围的线路 reference 扫描，再使用 `--reference-first --save loss`；reference 只存 Raw，程序暂停等你切换光路按 Enter，随后器件扫描内存保留 Raw/Loss，并导出 Loss。没有 reference 时不生成虚假的 Loss。
 
 ## 5. 结果保存
 
-- 界面/`exporter.py` 导出兼容 Santec STS 软件的 CSV(14 行表头 + 数据)。
-- 扫谱脚本每段输出 `wavelength_nm, chN_power_dbm..., monitor_dbm`。
+- 界面和批量脚本导出采用官方样本的 CSV 列名和 14 行元数据结构；尚未验证官方软件重新导入。
+- 本次运行自行扫描设置 reference（只保存 Raw）；后续测量在内存同时保留 Raw/Loss，保存类型可选。
+- Raw 包含波长、monitor 与各通道功率；Loss 为 reference − measurement（dB）。详见 [使用说明](../docs/USAGE_AND_VALIDATION.md#reference内存与-rawloss-导出)。
 - 默认目录:界面 `./scan_result_raw.csv`;脚本 `./scan_results/<job>_<时间戳>/`。
 
 ## 6. 目录说明
@@ -126,3 +161,15 @@ remote-client/
 pip install pytest
 pytest
 ```
+
+### 在界面中运行脚本
+
+主界面顶部点击 **扫描脚本…**，可以直接编辑示例，或打开/另存 `.scan` 文件；连接仪器并等待激光就绪后点击 **运行脚本**。
+
+- 每段扫描完成后，主图立即显示结果，加入扫描历史，并按脚本配置自动保存（不受主界面“自动保存”复选框影响）。参数栏同步显示正在执行的扫描参数。
+- `wait 5s` 在保存完成后倒计时，期间可以查看 Raw/Loss、切换历史曲线；倒计时结束执行下一段。
+- 点击 **暂停脚本** 可延长查看时间；若正在扫描，会先完成本段并保存。点击 **继续脚本** 立即跳过剩余查看等待，执行下一段。
+- 在脚本窗口勾选 **每段结束后手动继续**，则每个中间结果都无限等待你点击继续，最后一段完成后直接结束。
+- **停止脚本** 会停止后续步骤；正在扫描时同时请求取消本段。已保存文件和已有历史结果保留，激光保持开启。
+- UI 脚本使用当前界面会话中实测的 Reference，导出类型在启动时读取主界面 Raw/Loss 选择，过程中保持固定；没有有效 reference 就没有 Loss。要测 reference，请先用主界面“扫描 Reference”，再运行器件脚本。
+- 脚本运行时锁定仪器操作和手动扫描；默认任一扫描或保存失败就停止，不会悄悄继续下一段。
