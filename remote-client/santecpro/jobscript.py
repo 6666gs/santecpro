@@ -26,7 +26,7 @@ import math
 
 from santecpro.sweep_rules import validate_sts_sweep_params
 
-_BUILTIN_DEFAULTS = {"power": 0.0, "range": 1, "channels": (1,), "averaging": 0.01}
+_BUILTIN_DEFAULTS = {"power": 0.0, "range": (1,), "channels": (1,), "averaging": 0.01}
 
 
 class JobScriptError(Exception):
@@ -53,6 +53,7 @@ class Segment:
     mpm_averaging_time_ms: float
     direction: str                    # "fwd" | "rev"
     wait_after_s: float = 0.0
+    mpm_ranges: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -162,6 +163,13 @@ def _parse_step(value: str, lineno: int) -> float:
     raise JobScriptError(lineno, f"step needs a unit, e.g. 20pm or 0.02nm (got '{value}')")
 
 
+def _parse_ranges(value: str, lineno: int) -> tuple[int, ...]:
+    values = tuple(_int(v, lineno, "range") for v in value.split(","))
+    if not values or any(v not in range(1, 6) for v in values) or len(set(values)) != len(values):
+        raise JobScriptError(lineno, "range must list distinct ranges 1-5, e.g. range=2,3,4,5")
+    return tuple(sorted(values))
+
+
 def _parse_channels(value: str, lineno: int) -> tuple[int, ...]:
     channels: list[int] = []
     for part in value.split(","):
@@ -185,7 +193,7 @@ def _apply_set(defaults: dict, args: list[str], lineno: int) -> None:
         if key == "power":
             defaults["power"] = _num(value, lineno, "power")
         elif key == "range":
-            defaults["range"] = _int(value, lineno, "range")
+            defaults["range"] = _parse_ranges(value, lineno)
         elif key == "channels":
             defaults["channels"] = _parse_channels(value, lineno)
         elif key == "averaging":
@@ -217,7 +225,7 @@ def _parse_scan(args: list[str], lineno: int, defaults: dict) -> list[Segment]:
         elif key == "power":
             params["power"] = _num(value, lineno, "power")
         elif key == "range":
-            params["range"] = _int(value, lineno, "range")
+            params["range"] = _parse_ranges(value, lineno)
         elif key == "channels":
             params["channels"] = _parse_channels(value, lineno)
         elif key == "averaging":
@@ -234,7 +242,7 @@ def _parse_scan(args: list[str], lineno: int, defaults: dict) -> list[Segment]:
     if direction not in ("forward", "reverse", "both"):
         raise JobScriptError(lineno, f"invalid dir '{direction}' (forward|reverse|both)")
 
-    if params["range"] not in range(1, 6) or params["averaging"] <= 0:
+    if params["averaging"] <= 0:
         raise JobScriptError(lineno, "range must be 1-5 and averaging must be positive")
     try:
         validate_sts_sweep_params(start, stop, step, speed)
@@ -261,7 +269,8 @@ def _expand_direction(
             step=step,
             speed=speed,
             power=params["power"],
-            mpm_range=params["range"],
+            mpm_range=params["range"][0],
+            mpm_ranges=params["range"] if len(params["range"]) > 1 else (),
             mpm_channels=params["channels"],
             mpm_averaging_time_ms=params["averaging"],
             direction=tag,

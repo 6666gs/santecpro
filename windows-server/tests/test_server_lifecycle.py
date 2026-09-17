@@ -191,3 +191,45 @@ def test_failed_cached_read_releases_connection(instruments):
         assert client.post('/api/dll/mpm/powers').status_code == 500
     meter.disconnect.assert_called_once()
     assert server.alignment_meter.meter is None
+
+
+def test_alignment_tolerates_brief_maintenance_lock(instruments):
+    import time
+    _, meter = instruments
+    meter.read_power_channels.return_value = {1:-12.0}
+    held = threading.Event()
+    def maintenance():
+        with server.instrument_lock:
+            held.set()
+            time.sleep(.03)
+    thread = threading.Thread(target=maintenance)
+    thread.start()
+    try:
+        assert held.wait(1)
+        with server.app.test_client() as client:
+            response = client.post('/api/dll/mpm/powers', json={})
+        assert response.status_code == 200
+        assert response.json['powers'] == {'1':-12.0}
+    finally:
+        thread.join(1)
+
+
+def test_alignment_busy_is_structured_and_does_not_execute(instruments):
+    _, meter = instruments
+    held, release = threading.Event(), threading.Event()
+    def scan():
+        with server.instrument_lock:
+            held.set()
+            release.wait(3)
+    thread = threading.Thread(target=scan)
+    thread.start()
+    try:
+        assert held.wait(1)
+        with server.app.test_client() as client:
+            response = client.post('/api/dll/mpm/powers', json={})
+        assert response.status_code == 409
+        assert response.json['code'] == 'instruments_busy'
+        meter.read_power_channels.assert_not_called()
+    finally:
+        release.set()
+        thread.join(1)

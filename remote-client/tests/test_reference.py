@@ -25,7 +25,7 @@ def test_calculate_reference_il_interpolates_reference_to_measurement_grid():
 
     np.testing.assert_allclose(il.wavelengths, [1540.5, 1541.5])
     np.testing.assert_allclose(il.reference_powers, [0.5, 1.5])
-    np.testing.assert_allclose(il.il, [10.5, 21.5])
+    np.testing.assert_allclose(il.il, [-10.5, -21.5])
 
 
 def test_calculate_reference_il_rejects_measurement_outside_reference_span():
@@ -51,4 +51,4 @@ def test_calculate_reference_il_for_channel_uses_matching_channel():
     il = calculate_reference_il_for_channel(reference, measurement, 2)
 
     np.testing.assert_allclose(il.reference_powers, [11.0])
-    np.testing.assert_allclose(il.il, [4.0])
+    np.testing.assert_allclose(il.il, [-4.0])

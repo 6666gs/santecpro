@@ -27,7 +27,7 @@ def test_ui_keeps_both_formats_and_reference_export_is_raw(monkeypatch, tmp_path
         record = window._last_record
         assert window.export_combo.model().item(1).isEnabled()
         assert len(window._session.records) == 2
-        np.testing.assert_allclose(record.loss[1], 10)
+        np.testing.assert_allclose(record.loss[1], -10)
         window.save_path_edit.setText(str(tmp_path / 'device.csv'))
         window.export_combo.setCurrentIndex(0)
         window._save_last_result()
@@ -39,7 +39,7 @@ def test_ui_keeps_both_formats_and_reference_export_is_raw(monkeypatch, tmp_path
         # Selection and view switches must not recalculate or delete losses.
         window.view_combo.setCurrentIndex(1)
         window._clear_reference()
-        np.testing.assert_allclose(record.loss[1], 10)
+        np.testing.assert_allclose(record.loss[1], -10)
         window.history_combo.setCurrentIndex(0)
         assert window.export_combo.currentData() == 'raw'
         window._save_last_result()
@@ -47,5 +47,23 @@ def test_ui_keeps_both_formats_and_reference_export_is_raw(monkeypatch, tmp_path
         rows=list(csv.reader((tmp_path / 'device_001_raw.csv').open()))
         assert rows[14][2] == 'Raw_M1-Ch1-R1(dBm)'
         assert window._last_record.is_reference
+    finally:
+        window.close()
+
+
+def test_main_filename_updates_autosave_without_changing_directory(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    window = ui_app.ScanMainWindow(auto_connect=False)
+    try:
+        window.save_path_edit.setText(str(tmp_path / 'old.csv'))
+        assert window.save_name_edit.text() == 'old.csv'
+        window.save_name_edit.setText('device.02')
+        window.save_check.setChecked(True)
+        window._task_finished(ui_app.WorkerResult('scan', result(-12)))
+        assert (tmp_path / 'device.02_raw.csv').exists()
+        assert window.save_path_edit.text() == str(tmp_path / 'device.02.csv')
+        window.save_name_edit.setText('device.03.csv')
+        window._save_last_result()
+        assert (tmp_path / 'device.03_raw.csv').exists()
     finally:
         window.close()

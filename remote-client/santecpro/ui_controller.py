@@ -38,6 +38,7 @@ class ScanSettings:
     mpm_channel: int
     mpm_averaging_time_ms: float
     mpm_channels: tuple[int, ...] = ()
+    mpm_ranges: tuple[int, ...] = ()
 
 
 class ScanUiController:
@@ -106,6 +107,7 @@ class ScanUiController:
             mpm_channel=settings.mpm_channel,
             mpm_channels=settings.mpm_channels,
             mpm_range=settings.mpm_range,
+            **({"mpm_ranges": settings.mpm_ranges} if settings.mpm_ranges else {}),
             mpm_averaging_time_ms=settings.mpm_averaging_time_ms,
             csv_name="",
             plot=False,

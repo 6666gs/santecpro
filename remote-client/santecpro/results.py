@@ -133,7 +133,7 @@ def merge_multi_range(scan_results: list[ScanResult]) -> ScanResult:
 def calculate_il(reference: ScanResult, measurement: ScanResult) -> np.ndarray:
     """Calculate insertion loss from reference and measurement scans.
 
-    IL = P_ref - P_meas  (dB)
+    IL = P_meas - P_ref  (dB)
 
     If the wavelength grids differ, the measurement powers are interpolated
     onto the reference wavelength grid before subtraction.
@@ -145,4 +145,4 @@ def calculate_il(reference: ScanResult, measurement: ScanResult) -> np.ndarray:
             reference.wavelengths, measurement.wavelengths, measurement.powers
         )
 
-    return reference.powers - meas_powers
+    return meas_powers - reference.powers

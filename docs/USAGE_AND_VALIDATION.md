@@ -94,15 +94,15 @@ HTTP 超时不等于仪器已经停止；发生通信中断后先检查服务端
 
 ## Reference、内存与 Raw/Loss 导出
 
-Reference 必须在本次运行中自行扫描设置，没有官方预设 reference，也不从磁盘加载旧 reference。
+Reference 可以自行扫描设置，也可以从官方或本程序导出的 Raw CSV 导入。
 
-1. 接好用于扣除线路响应的参考光路，点击“扫描并设置 Reference”；也可先扫描，再点“将所选扫描设为 Reference”。Reference 只支持 Raw 导出。
+1. 接好用于扣除线路响应的参考光路，点击“扫描并设置 Reference”；也可先扫描，再点“将所选扫描设为 Reference”。Reference 只支持 Raw 导出。也可在 Reference 菜单点击“读取 Raw 文件并设为 Reference…”，从官方或本程序的 Raw CSV 设置参考。
 2. 切换到待测器件光路，再执行普通扫描。只要 reference 的模块、通道和波长范围匹配，每次扫描完成就同时在内存中保留 Raw 和 Loss。
 3. “显示 Raw / 显示 Loss”只决定图上显示哪份数据；保存类型单独选择 Raw 或 Loss。先保存一种后，可切换并保存另一种，无需重扫。
-4. 扫描历史保留本次运行的所有扫描，可选择之前的扫描查看、导出。更换或清除 reference 不会重算或删除之前测量已缓存的 loss；新 reference 只影响之后的扫描。
+4. 扫描历史保留当前缓存中的扫描，可选择之前的扫描查看、导出。更换或清除 reference 不会重算或删除之前测量已缓存的 loss；新 reference 只影响之后的扫描。
 5. 尚未设置 reference，或其通道、模块、波长覆盖不匹配时，保留 Raw，明确显示 Loss 不可用，不生成假 loss。关闭软件会释放内存历史，所需结果应先保存。
 
-Loss 当前采用**正值插入损耗**：`reference_dBm - measurement_dBm`；reference 插值到测量波长点。不自动使用 monitor 做漂移归一化，不声称等同官方软件的归一化算法。Monitor 始终保留在 Raw 中。
+Loss 当前采用**测量减参考的插损谱**：`measurement_dBm - reference_dBm`；reference 插值到测量波长点。不自动使用 monitor 做漂移归一化，不声称等同官方软件的归一化算法。Monitor 始终保留在 Raw 中。
 
 导出使用样本中的 14 行元数据结构，第 15 行为列名：
 
@@ -144,6 +144,6 @@ python run_ui.py --preview       # 示例谱图，仅预览布局，不连接或
 
 ## 重复扫描脚本与延时
 
-新增可直接修改的 `remote-client/jobs/device_two_pass.scan`：1500–1630 nm、1 pm、20 nm/s 扫描并保存，等待 5 s，再进行 1545–1555 nm、0.1 pm、1 nm/s 扫描并保存。`device` 设置器件名，`output` 设置 Mac 本地目录，`wait` 设置保存后的等待秒数。每次运行创建独立目录，文件名包含器件名、序号、标签、范围、步长、速度、方向和 Raw/Loss 类型。完整语法和运行命令见 [客户端说明](../remote-client/README.md#器件宽谱--精细扫描)。
+新增可直接修改的 `remote-client/jobs/device_two_pass.scan`：1500–1630 nm、1 pm、20 nm/s 扫描并保存，等待 5 s，再进行 1545–1555 nm、0.1 pm、1 nm/s 扫描并保存。`device` 设置器件名，`output` 设置 Mac 本地目录，`wait` 设置保存后的等待秒数。直接使用 `output` 指定的目录，目录不存在时创建；重复文件自动编号而不覆盖，也不生成额外子目录。文件名包含器件名、序号、标签、范围、步长、速度、方向和 Raw/Loss 类型。完整语法和运行命令见 [客户端说明](../remote-client/README.md#器件宽谱--精细扫描)。
 
 已用模拟扫描器验证保存→等待→下一段顺序、等待中断、保存失败停止和同名运行目录保护；CLI dry-run 验证不连接硬件。两组参数尚需实际仪器运行验收。

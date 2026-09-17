@@ -70,7 +70,7 @@ python run_job.py jobs/example.scan             # 逐段自动扫并保存
 
 **语法**(一行一条；注释放在独立一行，以 `#` 开头；下列行尾说明仅供阅读):
 ```text
-job <名字>                          # 可选,命名输出文件夹
+job <名字>                          # 可选,任务名（记录到 manifest）
 device "器件名字"                    # 可选,自动加入文件名
 output "~/Measurements/santec"       # 可选,Mac 本地保存路径
 wait 5s                             # 放在 scan 后面,保存后等待
@@ -96,7 +96,7 @@ python run_job.py my_job.scan --dry-run                          # 解析+校验
 python run_job.py my_job.scan --outdir ./scan_results --keep-going
 ```
 - 遇错默认**停**;`--keep-going` 继续后续段。
-- 未设置 `device` 时保留原文件名。输出:`scan_results/<job名>_<时间戳>/` 下每段一个 `NN_<标签>_<fwd|rev>_<raw|loss>.csv` + `manifest.json`(记录每段参数/方向/点数/成败/耗时)。
+- 未设置 `device` 时保留原文件名。输出:指定的输出目录（默认 `scan_results/`） 下每段一个 `NN_<标签>_<fwd|rev>_<raw|loss>.csv` + `manifest.json`(记录每段参数/方向/点数/成败/耗时)。
 
 ### 器件宽谱 + 精细扫描
 
@@ -121,7 +121,7 @@ python run_job.py jobs/device_two_pass.scan --url http://WINDOWS_IP:5000
 
 - `--dry-run` 只显示参数、文件名、等待时间和保存目录，不连接仪器。
 - `output` 是 **Mac 本地目录**，支持 `~` 和带空格的引号路径；相对路径以 `.scan` 文件所在目录为基准。`--outdir` 优先覆盖它；两者都省略时用当前工作目录的 `scan_results`。
-- 每次生成 `two_pass_<时间戳含微秒>/` 独立目录，不覆盖已有运行。示例文件名：`device_001_01_wide_1500-1630nm_1pm_20nms_fwd_raw.csv`、`device_001_02_fine_1545-1555nm_0.1pm_1nms_fwd_raw.csv`。`nms` 表示 nm/s，全部参数另存于 `manifest.json`。
+- 直接使用 `output` 指定目录：已存在则复用，不存在则递归创建；不再增加任务名/时间戳子目录。同名 CSV 自动加 `_001`、`_002` 等编号，重复运行的清单保存为 `manifest_001.json`、`manifest_002.json` 等，不覆盖旧结果。示例文件名：`device_001_01_wide_1500-1630nm_1pm_20nms_fwd_raw.csv`、`device_001_02_fine_1545-1555nm_0.1pm_1nms_fwd_raw.csv`。`nms` 表示 nm/s，全部参数另存于 `manifest.json`。
 - `wait 5s` 从前一段 CSV 和 manifest 写入完成后计时；不是从开始扫描计时。`dir=both` 后的等待发生在正反两次扫描都完成后；末尾的 wait 也会执行。默认扫描或保存失败就停止；显式 `--keep-going` 后可恢复的失败也会等待再继续。
 - Ctrl+C 可中断等待、阻止下一段扫描；已经保存的文件保留。启动时检查并等待激光器就绪，扫描间隔与任务结束不关光。
 - 默认保存 Raw。命令行任务与 GUI 内存会话独立，**不自动沿用 GUI reference**。需要 Loss 时，在脚本最前面额外加一段覆盖后续波长范围的线路 reference 扫描，再使用 `--reference-first --save loss`；reference 只存 Raw，程序暂停等你切换光路按 Enter，随后器件扫描内存保留 Raw/Loss，并导出 Loss。没有 reference 时不生成虚假的 Loss。
@@ -130,8 +130,8 @@ python run_job.py jobs/device_two_pass.scan --url http://WINDOWS_IP:5000
 
 - 界面和批量脚本导出采用官方样本的 CSV 列名和 14 行元数据结构；尚未验证官方软件重新导入。
 - 本次运行自行扫描设置 reference（只保存 Raw）；后续测量在内存同时保留 Raw/Loss，保存类型可选。
-- Raw 包含波长、monitor 与各通道功率；Loss 为 reference − measurement（dB）。详见 [使用说明](../docs/USAGE_AND_VALIDATION.md#reference内存与-rawloss-导出)。
-- 默认目录:界面 `./scan_result_raw.csv`;脚本 `./scan_results/<job>_<时间戳>/`。
+- Raw 包含波长、monitor 与各通道功率；Loss 为 measurement − reference（dB）。详见 [使用说明](../docs/USAGE_AND_VALIDATION.md#reference内存与-rawloss-导出)。
+- 默认目录:界面 `./scan_result_raw.csv`;脚本 `./scan_results/`（可用 `output` 指定）。
 
 ## 6. 目录说明
 
@@ -187,7 +187,7 @@ pytest
 
 ### 单波长对光监视
 
-在“仪器 → 对光监视…”的小窗口中编辑激光波长（nm）和出射功率（dBm），点击“应用并开始监视”；运行期间可继续编辑并再次应用。窗口初始波长取扫描起点、初始功率取扫描功率，修改只在点击应用时发送。仪器会拒绝超出自身能力的参数。MPM 同步设置测量波长并启用单点 READ 自动量程，无需选扫描 Range；自动量程仍受模块物理测量范围限制。后续扫描会重新设置固定扫描 Range。
+点击主界面顶部“对光监视”，在小窗口中编辑激光波长（nm）和出射功率（dBm），点击“应用并开始监视”；运行期间可继续编辑并再次应用。窗口优先恢复上次成功应用的对光波长和功率，首次使用时取扫描起点和扫描功率，修改只在点击应用时发送。仪器会拒绝超出自身能力的参数。MPM 同步设置测量波长并启用单点 READ 自动量程，无需选扫描 Range；自动量程仍受模块物理测量范围限制。后续扫描会重新设置固定扫描 Range。
 
 窗口以后台线程读数，关闭时等待正在执行的请求结束。打开期间主窗口不能启动扫描，避免同时改变仪器状态。停止和关闭均保持激光开启及最后应用的波长/功率，不重新开光或关光。必须同时更新 Windows 服务；旧服务无法确认自动量程和波长时会明确提示更新。
 
@@ -196,3 +196,35 @@ pytest
 对光监视以 **100 ms（目标 10 次/秒）**为刷新周期；读取耗时计入周期，较慢时完成上一请求才发下一次，不并发堆积。状态栏显示实际完成读数的刷新率（包含网络及仪器耗时，并非保证仪器每次都生成独立新样本）。Windows 复用 MPM 连接，正常轮询不再每次 Connect/DisConnect；约 5–6 秒没有读数请求后自动释放连接，开始扫描/其他仪器操作前也先释放，发生读取错误则立即释放。停止/关闭窗口停止发读数请求，服务器短暂保留连接后释放，均不关光。
 
 图窗上方的“X 轴缩放”是开关：启用后在曲线区域按住鼠标左键横向拖选波长范围，纵轴自动适配该范围内全部显示通道，可连续拖选进一步放大。“显示全部”恢复当前曲线的完整范围；切换历史、Raw/Loss 或 Reference 时自动恢复新曲线的完整视图。缩放只改变显示，不修改内存数据或 CSV。两个按钮不影响应用窗口的全屏状态。
+
+### 导入 Raw Reference 与 Loss 符号
+
+从“Reference → 读取 Raw 文件并设为 Reference…”选择官方或本程序导出的 CSV，成功后加入历史并立即设为当前 Reference，供之后的器件扫描和 UI 脚本使用，不需要连接仪器。导入在后台执行，失败保留原 Reference，不会额外自动复制导出文件。支持同一模块的多通道单个 R1 曲线组、正向/反向严格单调波长；拒绝 Loss、重复波长、缺失/非有限数据及混合模块/多个曲线组。参考范围必须覆盖测量范围、模块与通道匹配，否则保留 Raw 并提示 Loss 不可用。步长可不同，Reference 插值到测量网格。官方文件仅有 dBm 量程值时保留它，MPM 档位编号标为未知，不猜测 Range 1。
+
+Loss 统一采用 `measurement_dBm - reference_dBm`，有损器件通常为负值，例如 −12 − (−2) = −10 dB。图示、GUI、脚本与导出均采用此定义；新 Loss CSV 在 Software 元数据行注明计算方向，保持 14 行元数据布局。旧 Loss 文件不会自动反号或覆盖，更换 Reference 也不会重算已有历史。新代码需重启 Mac 客户端；Windows 的旧式 IL API 同步调整了符号，但常用 STS Raw 扫描路径不涉及 Windows 端 Loss 计算。
+
+主界面底部“自动保存”左侧可直接编辑文件名，无需打开设置；可省略 `.csv`。旁边的 `…` 按钮选择保存目录和文件名，悬停输入框可查看完整路径。自动保存与“保存所选扫描”均使用这里的名称，仍自动添加 `_raw` / `_loss` 后缀并避免覆盖同名文件。脚本运行时此输入框禁用，脚本继续按自身器件名与输出路径命名。
+
+“对光监视”按钮位于主界面顶部，可直接打开。上次成功应用的对光波长和功率会保存在本机 SantecPro 偏好设置中，关闭窗口或重启客户端后仍会恢复；首次使用时取扫描页面的起点波长和功率。仅编辑但未应用、或应用失败的参数不会覆盖上次有效设置。打开窗口只恢复输入值，点击“应用并开始监视”才发送仪器命令。
+
+
+### MPM-211 多量程拼接
+
+在 **设置 → 采集** 勾选“多量程拼接（MPM-211）”，选择至少两个 Range（默认勾选 2、3、4、5）。软件按编号从小到大，各扫一次相同的波段、步长、速度、光源功率和通道，再返回一条拼接谱。关闭拼接后仍使用原来的单量程下拉框。
+
+脚本使用逗号分隔的 `range`，也支持在单个 scan 上覆盖默认值：
+
+```text
+job multi_range
+output "~/Measurements/device1"
+set power=0 channels=1 range=2,3,4,5
+scan wide 1500 1630 step=1pm speed=20
+wait 5s
+scan fine 1545 1555 step=0.1pm speed=1 range=2,3,4,5
+```
+
+一条 scan 包含整组量程扫描；`wait` 在整组完成并保存后开始。Reference 可以保持单量程，也可使用同一拼接设置，依然只保存 Raw。Loss 为拼接后的测量功率减 Reference。导出文件第 13 行记录 `MPM ranges,2+3+4+5` 和拼接算法；Raw 可重新导入为 Reference。每组在扫描历史中占一条记录，不保留各量程的完整独立谱。
+
+Windows 服务和 Mac 客户端需一起更新，重启 Windows 的 `server.py`。新增服务器文件 `multi_range.py` 必须一起复制。旧服务即使回显请求参数，也会被新客户端识别为不支持拼接，避免把单次扫描误认为完成整组。请求超时时间随量程数增长；取消或任何一档失败时，整组不产生最终结果。
+
+实现依据和局限见 [多量程拼接说明](../docs/MULTI_RANGE.md)。

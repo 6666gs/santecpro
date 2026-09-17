@@ -42,7 +42,7 @@ def _make_il_measurement() -> ILMeasurement:
         timestamp="2026-04-13T10:30:00",
         mpm_range=1,
     )
-    il = ref.powers - meas.powers
+    il = meas.powers - ref.powers
     return ILMeasurement(
         reference=ref,
         measurement=meas,

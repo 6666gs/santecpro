@@ -44,7 +44,7 @@ def test_runs_each_segment_and_writes_files(tmp_path):
     second = scanner.run_stsprocess_scan.call_args_list[1].kwargs
     assert second["start_wl"] == 1501.0 and second["stop_wl"] == 1500.0  # reverse swapped
 
-    job_dir = tmp_path / "jobA_20260704_120000"
+    job_dir = tmp_path
     assert (job_dir / "01_a_fwd_raw.csv").exists()
     assert (job_dir / "02_b_rev_raw.csv").exists()
     assert (job_dir / "manifest.json").exists()
@@ -92,7 +92,7 @@ def test_manifest_contents(tmp_path):
     job = parse_job("job jobA\nscan a 1500 1501 step=1pm speed=10")
     run_job(job, _scanner(), tmp_path, timestamp="ts")
 
-    manifest = json.loads((tmp_path / "jobA_ts" / "manifest.json").read_text())
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
     assert manifest["job"] == "jobA"
     assert manifest["timestamp"] == "ts"
     assert len(manifest["segments"]) == 1
@@ -122,7 +122,7 @@ def test_interrupt_preserves_completed_manifest(tmp_path):
     scanner.run_stsprocess_scan.side_effect = [_fake_result(), KeyboardInterrupt()]
     with pytest.raises(KeyboardInterrupt):
         run_job(job, scanner, tmp_path, timestamp='t')
-    manifest = json.loads((tmp_path / 'job_t' / 'manifest.json').read_text())
+    manifest = json.loads((tmp_path / 'manifest.json').read_text())
     assert len(manifest['segments']) == 1
     assert manifest['segments'][0]['ok']
 
@@ -159,7 +159,7 @@ def test_wait_only_after_csv_and_manifest_saved(tmp_path):
     def wait(seconds):
         assert seconds == 5
         assert scanner.run_stsprocess_scan.call_count == 1
-        folder = tmp_path / 'job_t'
+        folder = tmp_path
         assert (folder / 'chip1_01_wide_1500-1630nm_1pm_20nms_fwd_raw.csv').exists()
         manifest = json.loads((folder / 'manifest.json').read_text())
         assert manifest['device'] == 'chip1'
@@ -182,7 +182,7 @@ def test_interrupt_during_wait_preserves_data_and_stops_next_scan(tmp_path):
     with pytest.raises(KeyboardInterrupt):
         run_job(job, scanner, tmp_path, timestamp='t', sleep=interrupt)
     assert scanner.run_stsprocess_scan.call_count == 1
-    manifest = json.loads((tmp_path / 'job_t' / 'manifest.json').read_text())
+    manifest = json.loads((tmp_path / 'manifest.json').read_text())
     assert len(manifest['segments']) == 1
     assert manifest['segments'][0]['ok']
 
@@ -192,9 +192,13 @@ def test_existing_run_directory_is_never_overwritten(tmp_path):
     job = parse_job('scan a 1500 1501 step=1pm speed=10')
     scanner = _scanner()
     run_job(job, scanner, tmp_path, timestamp='t')
-    with pytest.raises(FileExistsError):
-        run_job(job, scanner, tmp_path, timestamp='t')
-    assert scanner.run_stsprocess_scan.call_count == 1
+    original = (tmp_path / '01_a_fwd_raw.csv').read_bytes()
+    run_job(job, scanner, tmp_path, timestamp='t')
+    assert scanner.run_stsprocess_scan.call_count == 2
+    assert (tmp_path / '01_a_fwd_raw.csv').read_bytes() == original
+    assert (tmp_path / '01_a_fwd_001_raw.csv').exists()
+    manifest = json.loads((tmp_path / 'manifest_001.json').read_text())
+    assert manifest['segments'][0]['csv'] == '01_a_fwd_001_raw.csv'
 
 
 def test_save_failure_stops_before_wait_and_next_scan(tmp_path, monkeypatch):

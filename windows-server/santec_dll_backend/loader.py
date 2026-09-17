@@ -3,9 +3,32 @@
 from __future__ import annotations
 
 import os
+import ntpath
+import threading
 import platform
 import sys
 from pathlib import Path
+
+
+_load_lock = threading.RLock()
+
+
+def _path_key(value: str) -> str:
+    """Compare Windows search paths including case, separators and quotes."""
+    return ntpath.normcase(ntpath.normpath(value.strip('"')))
+
+
+def _configure_search_path(directory: Path) -> None:
+    """Keep one vendor entry without touching unrelated PATH entries."""
+    value = str(directory)
+    key = _path_key(value)
+    current = os.environ.get("PATH", "")
+    entries = current.split(os.pathsep) if current else []
+    updated = os.pathsep.join([value, *[p for p in entries if _path_key(p) != key]])
+    if updated != current:
+        os.environ["PATH"] = updated
+    if not any(isinstance(p, str) and _path_key(p) == key for p in sys.path):
+        sys.path.insert(0, value)
 
 
 DEFAULT_DLL_DIR = Path(__file__).resolve().parents[1] / "vendor" / "santec_dll"
@@ -28,16 +51,16 @@ def load_santec_dlls(dll_dir: str | os.PathLike[str] | None = None) -> Path:
     if missing:
         raise FileNotFoundError("Missing Santec DLLs: " + ", ".join(missing))
 
-    quarantine_x86_daq(resolved)
+    # Instrument wrappers call this repeatedly, including during monitoring.
+    # Serialize initialization and never append another copy to the process PATH.
+    with _load_lock:
+        quarantine_x86_daq(resolved)
+        _configure_search_path(resolved)
 
-    os.environ["PATH"] = str(resolved) + os.pathsep + os.environ.get("PATH", "")
-    if str(resolved) not in sys.path:
-        sys.path.insert(0, str(resolved))
+        import clr  # type: ignore
 
-    import clr  # type: ignore
-
-    clr.AddReference(str(instrument))
-    clr.AddReference(str(sts_process))
+        clr.AddReference(str(instrument))
+        clr.AddReference(str(sts_process))
     return resolved
 
 

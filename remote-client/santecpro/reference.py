@@ -20,7 +20,7 @@ class ReferenceILResult:
 def calculate_reference_il(reference: ScanResult, measurement: ScanResult) -> ReferenceILResult:
     """Interpolate a reference scan and calculate insertion loss.
 
-    IL is defined as ``reference_power - measurement_power`` in dB.
+    IL is defined as ``measurement_power - reference_power`` in dB.
     """
     ref_wl = np.asarray(reference.wavelengths, dtype=float)
     ref_power = np.asarray(reference.powers, dtype=float)
@@ -38,7 +38,7 @@ def calculate_reference_il(reference: ScanResult, measurement: ScanResult) -> Re
         wavelengths=meas_wl.copy(),
         measurement_powers=meas_power.copy(),
         reference_powers=interp_ref,
-        il=interp_ref - meas_power,
+        il=meas_power - interp_ref,
     )
 
 

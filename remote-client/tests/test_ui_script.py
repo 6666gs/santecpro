@@ -180,3 +180,27 @@ def test_long_script_releases_old_arrays_but_keeps_manifest(gui):
     w._clear_saved_history()
     assert len(w._session.records) == w.history_combo.count() == 2
     assert len(list(w._script_dir.glob('*.csv'))) == 24
+
+
+def test_script_uses_exact_output_and_preserves_previous_run(gui, tmp_path):
+    app, w = gui
+    target = tmp_path / 'new' / 'measurements'
+    w.script_editor.setPlainText(f'job two_pass\ndevice chip\noutput "{target}"\n'
+                                'scan wide 1500 1630 step=1pm speed=20')
+    w._start_script()
+    pump(app, lambda: w._script_job is None and w._thread is None)
+    assert w._script_dir == target
+    assert target.is_dir()
+    csv_path = next(target.glob('*.csv'))
+    original = csv_path.read_bytes()
+    original_manifest = (target / 'manifest.json').read_bytes()
+    w._start_script()
+    pump(app, lambda: w._script_job is None and w._thread is None)
+    assert w._script_dir == target
+    assert len(list(target.glob('*.csv'))) == 2
+    assert not any(p.is_dir() for p in target.iterdir())
+    assert csv_path.read_bytes() == original
+    assert (target / 'manifest.json').read_bytes() == original_manifest
+    manifest = json.loads((target / 'manifest_001.json').read_text())
+    assert manifest['segments'][0]['csv'] != csv_path.name
+    assert (target / manifest['segments'][0]['csv']).exists()

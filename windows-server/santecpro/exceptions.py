@@ -21,3 +21,7 @@ class InstrumentOperationError(SantecError):
 
 class ScanCancelled(RuntimeError):
     """A user cancelled the scan; batch runners must not continue."""
+
+
+class InstrumentsBusyError(RuntimeError):
+    """Server rejected a request before execution because instruments are busy."""

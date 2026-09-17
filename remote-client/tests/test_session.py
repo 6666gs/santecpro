@@ -23,12 +23,12 @@ def test_reference_is_raw_only_and_measurements_hold_both(tmp_path):
     assert ref.is_reference and not ref.loss
     assert measured.reference_index == 0
     for ch in (1, 2):
-        np.testing.assert_allclose(measured.loss[ch], [10, 10])
+        np.testing.assert_allclose(measured.loss[ch], [-10, -10])
     raw_before = measured.raw.channel_powers[1].copy()
     save_record_csv(measured, tmp_path / 'raw.csv', 'raw')
     save_record_csv(measured, tmp_path / 'loss.csv', 'loss')
     np.testing.assert_array_equal(measured.raw.channel_powers[1], raw_before)
-    np.testing.assert_allclose(measured.loss[1], [10, 10])
+    np.testing.assert_allclose(measured.loss[1], [-10, -10])
     with pytest.raises(ValueError, match='raw'):
         save_record_csv(ref, tmp_path / 'invalid_loss.csv', 'loss')
     assert not (tmp_path / 'invalid_loss.csv').exists()
@@ -44,8 +44,8 @@ def test_reference_changes_only_affect_future_scans():
     second = session.add(scan(-11))
     session.clear_reference()
     third = session.add(scan(-11))
-    np.testing.assert_allclose(first.loss[1], 10)
-    np.testing.assert_allclose(second.loss[1], 8)
+    np.testing.assert_allclose(first.loss[1], -10)
+    np.testing.assert_allclose(second.loss[1], -8)
     assert not third.loss
     assert first.reference_index == 0 and second.reference_index == 2
     assert len(session.records) == 5
@@ -68,7 +68,7 @@ def test_set_reference_from_measured_history_does_not_rewrite_old_losses():
     session.set_reference(0)
     measured = session.add(scan(-11))
     session.clear_reference()
-    np.testing.assert_allclose(measured.loss[1], 10)
+    np.testing.assert_allclose(measured.loss[1], -10)
     assert session.records[0].is_reference
 
 
@@ -92,7 +92,7 @@ def test_trim_saved_preserves_reference_unsaved_and_stable_provenance():
     assert unsaved.reference_index == recent.reference_index == 1
     next_record = session.add(scan(-13))
     assert next_record.sequence == 5 and next_record.reference_index == 1
-    np.testing.assert_allclose(next_record.loss[1], 12)
+    np.testing.assert_allclose(next_record.loss[1], -12)
 
 
 def test_trim_saved_byte_budget_and_selected_record():

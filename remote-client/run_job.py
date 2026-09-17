@@ -125,7 +125,7 @@ def main() -> int:
     ok = sum(1 for r in results if r.ok)
     failed = sum(1 for r in results if not r.ok)
     skipped = len(job.segments) - len(results)
-    out = outdir / f"{job.name}_{timestamp}"
+    out = outdir
     print(f"\ndone: {ok} ok, {failed} failed, {skipped} skipped  ->  {out}")
     return 1 if failed else 0
 

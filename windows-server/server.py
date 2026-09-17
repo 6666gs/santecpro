@@ -36,6 +36,8 @@ import config
 from santec_dll_backend.instruments import DllMpm, DllTsl, ScanCancelled
 from santec_dll_backend.scanner import run_stsprocess_scan
 from alignment_cache import AlignmentMeterCache
+from dataclasses import replace
+from multi_range import RangeMerger, parse_ranges
 from stsprocess_api import build_sts_scan_settings, sts_scan_result_to_dict
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -74,8 +76,12 @@ def exclusive_instruments(func):
     """Reject competing requests instead of queuing commands behind a scan."""
     @wraps(func)
     def wrapper(*args, **kwargs):
-        if not instrument_lock.acquire(blocking=False):
-            return jsonify({"error": "Instruments are busy."}), 409
+        # Cache maintenance briefly holds this same lock. Alignment may wait a
+        # bounded 100 ms, but never queue indefinitely behind an active scan.
+        alignment = func.__name__ in ("dll_alignment_start", "dll_mpm_powers")
+        acquired = instrument_lock.acquire(timeout=0.1) if alignment else instrument_lock.acquire(blocking=False)
+        if not acquired:
+            return jsonify({"error": "Instruments are busy.", "code": "instruments_busy"}), 409
         try:
             if func.__name__ not in ("dll_alignment_start", "dll_mpm_powers"):
                 alignment_meter.close()
@@ -315,6 +321,9 @@ def scan_stsprocess():
             if scan_state.get("running"):
                 return jsonify({"error": "A scan is already running."}), 409
             settings = build_sts_scan_settings(data, BASE_DIR)
+            ranges = parse_ranges(data)
+            if len(ranges) > 1 and settings.csv_path:
+                raise ValueError("Multi-range CSV export must be performed by the client")
             scan_cancel.clear()
             _set_scan_state(
                 running=True,
@@ -326,7 +335,17 @@ def scan_stsprocess():
                 params=data,
             )
             logger.info("STSProcess scan request: %s", data)
-            result = run_stsprocess_scan(settings, cancel_event=scan_cancel)
+            merger = RangeMerger()
+            for index, rng in enumerate(ranges, 1):
+                if scan_cancel.is_set():
+                    raise ScanCancelled("Multi-range scan cancelled")
+                _set_scan_state(range_index=index, range_count=len(ranges), current_range=rng)
+                result = run_stsprocess_scan(replace(settings, mpm_range=rng), cancel_event=scan_cancel)
+                response = sts_scan_result_to_dict(result, {**data, "mpm_range": rng})
+                if len(ranges) > 1:
+                    response = merger.add(response)
+            if scan_cancel.is_set():
+                raise ScanCancelled("Scan cancelled")
             _set_scan_state(
                 running=False,
                 phase="completed",
@@ -334,7 +353,7 @@ def scan_stsprocess():
                 last_result_points=result.target_points,
                 last_error=None,
             )
-        return jsonify(sts_scan_result_to_dict(result, data))
+        return jsonify(response)
     except Exception as e:
         _set_scan_state(
             running=False,

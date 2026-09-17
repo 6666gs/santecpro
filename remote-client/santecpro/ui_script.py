@@ -7,7 +7,7 @@ from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
                             QTextEdit, QFileDialog, QMessageBox, QCheckBox, QLabel)
 from santecpro.jobscript import parse_job
-from santecpro.job_runner import csv_filename, SegmentResult, _write_manifest, record_info
+from santecpro.job_runner import csv_filename, SegmentResult, _write_manifest, record_info, reserve_output_path, new_output_file
 from santecpro.exporter import save_record_csv
 from santecpro.ui_controller import ScanSettings
 
@@ -77,8 +77,9 @@ class ScriptUiMixin:
             if not output.is_absolute():
                 output = self._script_path.resolve().parent / output
             self._script_stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-            self._script_dir = output / f'{job.name}_{self._script_stamp}'
-            self._script_dir.mkdir(parents=True, exist_ok=False)
+            self._script_dir = output
+            self._script_dir.mkdir(parents=True, exist_ok=True)
+            self._script_manifest = reserve_output_path(self._script_dir / 'manifest.json')
         except Exception as exc:
             QMessageBox.warning(self, '脚本无法运行', str(exc))
             return
@@ -106,11 +107,14 @@ class ScriptUiMixin:
         self.speed_combo.setCurrentIndex(self.speed_combo.findData(seg.speed))
         self.power_spin.setValue(seg.power)
         self.range_combo.setCurrentIndex(self.range_combo.findData(seg.mpm_range))
+        self.multi_range_check.setChecked(bool(seg.mpm_ranges))
+        for rng, check in enumerate(self.range_checks, 1):
+            check.setChecked(rng in seg.mpm_ranges)
         for channel, check in enumerate(self.channel_checks, 1):
             check.setChecked(channel in seg.mpm_channels)
         settings = ScanSettings(seg.start_wl, seg.stop_wl, seg.step, seg.speed,
                                 seg.power, 1, seg.mpm_range, self._script_module,
-                                seg.mpm_channels[0], seg.mpm_averaging_time_ms, seg.mpm_channels)
+                                seg.mpm_channels[0], seg.mpm_averaging_time_ms, seg.mpm_channels, seg.mpm_ranges)
         self._script_started = time.monotonic()
         self._run_task('script_scan', lambda: self._controller.run_single_scan(settings))
         self.status_label.setText(f'脚本 {self._script_index + 1}/{len(self._script_job.segments)}：{seg.label} 扫描中')
@@ -127,7 +131,9 @@ class ScriptUiMixin:
         path = self._script_dir / csv_filename(self._script_job, seg, self._script_index + 1, self._script_kind)
         error = ''
         try:
-            save_record_csv(record, str(path), self._script_kind)
+            with new_output_file(path) as target:
+                save_record_csv(record, str(target), self._script_kind)
+            path = target
             record.saved = True
             self._log(f'Saved {self._script_kind}: {path}')
         except Exception as exc:
@@ -140,7 +146,7 @@ class ScriptUiMixin:
         self._script_remaining = seg.wait_after_s
         self._script_index += 1
         try:
-            _write_manifest(self._script_dir / 'manifest.json', self._script_job,
+            _write_manifest(self._script_manifest, self._script_job,
                             self._script_stamp, self._script_results)
         except OSError as exc:
             error = str(exc)
@@ -156,7 +162,7 @@ class ScriptUiMixin:
             self._script_results.append(SegmentResult(seg.label, seg.direction, False, '', 0,
                 self._script_error or '用户停止脚本', time.monotonic() - self._script_started))
             try:
-                _write_manifest(self._script_dir / 'manifest.json', self._script_job,
+                _write_manifest(self._script_manifest, self._script_job,
                                 self._script_stamp, self._script_results)
             except OSError as exc:
                 self._log(f'保存 manifest 失败：{exc}')

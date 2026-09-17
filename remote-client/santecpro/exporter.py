@@ -53,7 +53,8 @@ def _write_header(writer, tsl_idn: str, mpm_idn: str, params: dict, timestamp: s
     module = int(params.get("mpm_module", 0)) + 1
     rows = [
         [date_part, time_part, "", "", ""],
-        ["Software", "santecpro", f"Ver.{__version__}", "", ""],
+        ["Software", "santecpro", f"Ver.{__version__}",
+         "Loss convention" if params.get("loss_convention") else "", params.get("loss_convention", "")],
         ["TSL", tsl["vendor"], tsl["model"], tsl["serial"], tsl["firmware"], "", "", ""],
         ["PowerMeter", mpm["vendor"], mpm["model"], mpm["serial"], mpm["firmware"], "", "", ""],
         [" ", f"Module{module}", params.get("module_model", ""), params.get("module_serial", ""), params.get("module_info", "")],
@@ -64,7 +65,9 @@ def _write_header(writer, tsl_idn: str, mpm_idn: str, params: dict, timestamp: s
         ["Speed", f"{params.get('speed', 0):.6f}", "nm/s", "", ""],
         ["Source power", f"{params.get('power', 0):.6f}", "dBm", "", ""],
         ["Averaging Time", f"{params['mpm_averaging_time_ms'] / 1000:.6f}" if "mpm_averaging_time_ms" in params else "", "s", "", ""],
-        ["Power meter range", params.get("power_meter_range_dbm", ""), "dBm", "MPM range", mpm_range],
+        ["Power meter range", params.get("power_meter_range_dbm", ""), "dBm", "MPM ranges" if params.get("range_merge_method") else "MPM range",
+         "+".join(map(str, params["mpm_ranges"])) if params.get("range_merge_method") else mpm_range or "",
+         *([params["range_merge_method"]] if params.get("range_merge_method") else [])],
         ["TSL PM- range", params.get("tsl_pm_range", ""), "", "", ""],
     ]
     writer.writerows(rows)
@@ -145,7 +148,8 @@ def _save_loss_columns(scan, losses, tsl_idn, mpm_idn, filepath, *, wavelengths=
     module = int(scan.scan_params.get("mpm_module", 0)) + 1
     with open(filepath, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        _write_header(writer, tsl_idn, mpm_idn, scan.scan_params, scan.timestamp,
+        _write_header(writer, tsl_idn, mpm_idn,
+                      {**scan.scan_params, "loss_convention": "measurement - reference"}, scan.timestamp,
                       mpm_range=scan.mpm_range)
         headers = ["Wavelength(nm)", *[f"IL_M{module}_CH{ch}" for ch in channels]]
         padding = [""] * max(0, 5 - len(headers))

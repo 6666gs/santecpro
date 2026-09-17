@@ -30,8 +30,8 @@ class ScanRecord:
 class ScanSession:
     """Keep raw and calculated loss independent of display/export selection.
 
-    Loss is positive insertion loss: reference dBm minus measurement dBm.
-    A new reference affects future scans only. Nothing is imported from disk.
+    Loss is measurement dBm minus reference dBm (negative for attenuation).
+    A new measured or imported reference affects future scans only.
     """
     def __init__(self):
         self.records: list[ScanRecord] = []
@@ -50,7 +50,7 @@ class ScanSession:
         if is_reference:
             record.loss_error = "Reference 只保存 raw"
         elif self.reference is None:
-            record.loss_error = "尚未扫描并设置 reference，loss 不可用"
+            record.loss_error = "尚未设置 reference，loss 不可用"
         else:
             record.reference_index = self.records[self.reference_index].sequence - 1
             try:

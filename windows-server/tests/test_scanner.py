@@ -266,15 +266,15 @@ class TestCalculateIL:
     """Tests for the calculate_il algorithm."""
 
     def test_basic_il(self):
-        """IL = P_ref - P_meas."""
+        """IL = P_meas - P_ref."""
         ref = _make_scan_result(powers=np.array([0.0, -1.0, -2.0]), n=3)
         meas = _make_scan_result(powers=np.array([-3.0, -4.0, -5.0]), n=3)
 
         il = calculate_il(ref, meas)
-        np.testing.assert_array_almost_equal(il, [3.0, 3.0, 3.0])
+        np.testing.assert_array_almost_equal(il, [-3.0, -3.0, -3.0])
 
     def test_il_with_monitor_subtraction(self):
-        """Verify IL computation is purely ref_power - meas_power."""
+        """Verify IL computation is purely meas_power - ref_power."""
         ref = _make_scan_result(
             powers=np.array([-5.0, -5.0, -5.0]),
             monitor_powers=np.array([7.5, 7.5, 7.5]),
@@ -287,7 +287,7 @@ class TestCalculateIL:
         )
 
         il = calculate_il(ref, meas)
-        np.testing.assert_array_almost_equal(il, [5.0, 6.0, 7.0])
+        np.testing.assert_array_almost_equal(il, [-5.0, -6.0, -7.0])
 
     def test_il_with_different_wavelength_grids_interpolates(self):
         """When grids differ, measurement is interpolated onto reference grid."""
@@ -307,8 +307,8 @@ class TestCalculateIL:
 
         il = calculate_il(ref, meas)
         # meas interpolated at 1500, 1505, 1510 -> 0, -2, -4
-        # IL = 0-0, 0-(-2), 0-(-4) = 0, 2, 4
-        np.testing.assert_array_almost_equal(il, [0.0, 2.0, 4.0])
+        # IL = 0-0, -2-0, -4-0 = 0, -2, -4
+        np.testing.assert_array_almost_equal(il, [0.0, -2.0, -4.0])
 
 
 # ======================================================================
@@ -604,7 +604,7 @@ class TestScannerILMeasurement:
         assert isinstance(il_result.il, np.ndarray)
         assert isinstance(il_result.wavelengths, np.ndarray)
 
-        # IL should be reference.power - measurement.power
+        # IL should be measurement.power - reference.power
         assert len(il_result.il) == len(il_result.wavelengths)
         assert len(il_result.il) == len(il_result.reference.powers)
 

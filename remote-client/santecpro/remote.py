@@ -24,7 +24,7 @@ import numpy as np
 import requests
 
 from santecpro.results import ScanResult, ILMeasurement
-from santecpro.exceptions import ScanCancelled
+from santecpro.exceptions import ScanCancelled, InstrumentsBusyError
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +182,7 @@ class RemoteScanner:
         mpm_channels: list[int] | tuple[int, ...] | None = None,
         mpm_range: int = 1,
         mpm_averaging_time_ms: float = 0.01,
+        mpm_ranges: tuple[int, ...] = (),
         csv_name: str = "",
         plot: bool = True,
         save_csv: str | None = None,
@@ -201,7 +202,11 @@ class RemoteScanner:
         }
         if mpm_channels is not None:
             payload["mpm_channels"] = list(mpm_channels)
+        if mpm_ranges:
+            payload["mpm_ranges"] = list(mpm_ranges)
         data = self._post("/api/scan/stsprocess", payload)
+        if len(mpm_ranges) > 1 and (data.get("scan_params", {}).get("mpm_ranges") != sorted(mpm_ranges) or not data.get("scan_params", {}).get("range_merge_method")):
+            raise RuntimeError("Windows 服务未执行多量程扫描，请更新 Windows 服务后重试")
         result = self._dict_to_scan_result(data)
         result.scan_params["csv_path"] = data.get("csv_path", "")
         result.scan_params["raw_points"] = data.get("raw_points")
@@ -382,7 +387,8 @@ class RemoteScanner:
         if path.startswith("/api/dll/") or path == "/api/scan/stsprocess":
             data = {**self._addresses, **(data or {})}
         try:
-            resp = requests.post(url, json=data, timeout=self._timeout)
+            timeout = self._timeout * max(1, len((data or {}).get("mpm_ranges") or []))
+            resp = requests.post(url, json=data, timeout=timeout)
             try:
                 result = resp.json()
             except ValueError:
@@ -390,6 +396,10 @@ class RemoteScanner:
                 raise RuntimeError("Server returned invalid JSON")
             if result.get("cancelled"):
                 raise ScanCancelled(result.get("error", "Scan cancelled"))
+            if resp.status_code == 409 and (
+                result.get("code") == "instruments_busy" or result.get("error") == "Instruments are busy."
+            ):
+                raise InstrumentsBusyError(result["error"])
             if "error" in result:
                 raise RuntimeError(f"Server error: {result['error']}")
             resp.raise_for_status()

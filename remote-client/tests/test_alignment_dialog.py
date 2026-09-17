@@ -108,3 +108,109 @@ def test_refresh_budget_and_apply_during_inflight_read():
     pump(app, lambda: controller.start_alignment.call_count == 2 and dialog._thread is None)
     assert controller.start_alignment.call_args.args[0] == -5
     dialog.close()
+
+
+def test_successful_applied_settings_persist_across_dialogs(tmp_path):
+    from PyQt5.QtCore import QSettings
+    app = QApplication.instance() or QApplication([])
+    path = str(tmp_path / 'preferences.ini')
+    prefs = QSettings(path, QSettings.IniFormat)
+    controller = Mock()
+    controller.start_alignment.return_value = {1: -10}
+    dialog = AlignmentDialog(controller, 0, 0, (1,), 1, wavelength=1500, preferences=prefs)
+    dialog.wavelength_spin.setValue(1560.25)
+    dialog.power_spin.setValue(-7.5)
+    dialog._start()
+    pump(app, lambda: dialog._thread is None)
+    # Unapplied edits do not replace actual last-applied settings.
+    dialog.wavelength_spin.setValue(1570)
+    dialog.power_spin.setValue(-3)
+    dialog.close()
+    prefs2 = QSettings(path, QSettings.IniFormat)
+    reopened = AlignmentDialog(controller, 10, 0, (1,), 1, wavelength=1600, preferences=prefs2)
+    assert reopened.wavelength_spin.value() == 1560.25
+    assert reopened.power_spin.value() == -7.5
+    controller.start_alignment.assert_called_once()  # opening does not send commands
+    controller.start_alignment.side_effect = RuntimeError('rejected')
+    reopened.power_spin.setValue(-2)
+    reopened._start()
+    pump(app, lambda: reopened._thread is None)
+    assert float(prefs2.value('alignment/power_dbm')) == -7.5
+    reopened.close()
+
+
+def test_invalid_saved_settings_fall_back_to_initial_values(tmp_path):
+    from PyQt5.QtCore import QSettings
+    app = QApplication.instance() or QApplication([])
+    prefs = QSettings(str(tmp_path / 'bad.ini'), QSettings.IniFormat)
+    prefs.setValue('alignment/wavelength_nm', 'nan')
+    prefs.setValue('alignment/power_dbm', 'bad')
+    dialog = AlignmentDialog(Mock(), -4, 0, (1,), 1, wavelength=1540, preferences=prefs)
+    assert dialog.wavelength_spin.value() == 1540 and dialog.power_spin.value() == -4
+    dialog.close()
+
+
+def test_busy_reads_retry_automatically_without_reapplying_laser():
+    from santecpro.exceptions import InstrumentsBusyError
+    app = QApplication.instance() or QApplication([])
+    controller = Mock()
+    controller.start_alignment.return_value = {1: -10}
+    controller.read_alignment_powers.side_effect = [InstrumentsBusyError('busy'), InstrumentsBusyError('busy'), {1: -8}]
+    dialog = AlignmentDialog(controller, 0, 0, (1,), 1)
+    try:
+        dialog._start()
+        pump(app, lambda: dialog._thread is None)
+        dialog._poll()
+        pump(app, lambda: dialog._thread is None)
+        assert dialog._monitoring and dialog._timer.isActive()
+        assert dialog._timer.interval() == 250
+        assert '等待' in dialog._labels[1].text()
+        pump(app, lambda: controller.read_alignment_powers.call_count >= 3 and dialog._thread is None)
+        assert '-8.000' in dialog._labels[1].text()
+        assert dialog._busy_count == 0
+        assert dialog._timer.interval() <= 100
+        controller.start_alignment.assert_called_once()
+    finally:
+        dialog.close()
+
+
+def test_busy_apply_retries_original_settings_and_stop_cancels_retry():
+    from santecpro.exceptions import InstrumentsBusyError
+    app = QApplication.instance() or QApplication([])
+    controller = Mock()
+    controller.start_alignment.side_effect = [InstrumentsBusyError('busy'), {1: -10}]
+    dialog = AlignmentDialog(controller, -5, 0, (1,), 1, wavelength=1550)
+    try:
+        dialog._start()
+        pump(app, lambda: dialog._thread is None)
+        dialog.power_spin.setValue(-9)  # Unapplied edit must not affect retry.
+        pump(app, lambda: controller.start_alignment.call_count == 2 and dialog._thread is None)
+        assert controller.start_alignment.call_args.args[0] == -5
+        controller.read_alignment_powers.side_effect = InstrumentsBusyError('busy')
+        dialog._poll()
+        pump(app, lambda: dialog._thread is None)
+        dialog._stop()
+        assert not dialog._timer.isActive() and dialog._retry_task is None
+        dialog._poll()
+        assert controller.read_alignment_powers.call_count == 1
+        controller.laser_off.assert_not_called()
+    finally:
+        dialog.close()
+
+
+@pytest.mark.parametrize('payload,expected', [
+    ({'error':'Instruments are busy.'}, 'busy'),
+    ({'error':'occupied','code':'instruments_busy'}, 'busy'),
+    ({'error':'different conflict'}, 'error'),
+    ({'error':'cancelled','cancelled':True}, 'cancel'),
+])
+def test_http_busy_is_distinct_from_other_errors(monkeypatch, payload, expected):
+    from santecpro.exceptions import InstrumentsBusyError, ScanCancelled
+    response = Mock(status_code=409)
+    response.json.return_value = payload
+    monkeypatch.setattr('santecpro.remote.requests.post', Mock(return_value=response))
+    scanner = RemoteScanner('http://unused')
+    cls = {'busy':InstrumentsBusyError,'error':RuntimeError,'cancel':ScanCancelled}[expected]
+    with pytest.raises(cls) as exc:
+        scanner.read_alignment_powers(0, (1,))
+    if expected == 'error': assert not isinstance(exc.value, InstrumentsBusyError)

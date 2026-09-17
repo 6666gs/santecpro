@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
 
@@ -52,6 +53,35 @@ def csv_filename(job: JobSpec, seg: Segment, index: int, kind: str) -> str:
     return f"{index:02d}_{seg.label}_{seg.direction}_{kind}.csv"
 
 
+def reserve_output_path(path: Path) -> Path:
+    """Atomically choose an unused file in the requested directory."""
+    candidate = path
+    index = 0
+    while True:
+        try:
+            with candidate.open("x", encoding="utf-8"):
+                pass
+            return candidate
+        except FileExistsError:
+            index += 1
+            stem, tail = path.stem, ""
+            for suffix in ("_raw", "_loss"):
+                if stem.endswith(suffix):
+                    stem, tail = stem[:-len(suffix)], suffix
+                    break
+            candidate = path.with_name(f"{stem}_{index:03d}{tail}{path.suffix}")
+
+
+@contextmanager
+def new_output_file(path: Path):
+    target = reserve_output_path(path)
+    try:
+        yield target
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
+
+
 def run_job(
     job: JobSpec,
     scanner: Any,
@@ -72,8 +102,8 @@ def run_job(
         job: Parsed job specification.
         scanner: A connected ``RemoteScanner`` (or any object exposing
             ``run_stsprocess_scan``).
-        outdir: Base output directory; a ``<job>_<timestamp>/`` folder is made.
-        timestamp: Folder-name timestamp (passed in for deterministic output).
+        outdir: Exact output directory, created if missing.
+        timestamp: Run timestamp stored in the manifest.
         keep_going: Continue after a segment fails instead of stopping.
         log: Progress sink (defaults to ``print``).
 
@@ -88,8 +118,9 @@ def run_job(
         raise ValueError("save_kind must be raw or loss")
     if save_kind == "loss" and session.reference is None and not reference_first:
         raise ValueError("Loss export requires a measured reference (reference_first=True)")
-    job_dir = Path(outdir) / f"{job.name}_{timestamp}"
-    job_dir.mkdir(parents=True, exist_ok=False)  # never overwrite an earlier run
+    job_dir = Path(outdir).expanduser()
+    job_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = reserve_output_path(job_dir / "manifest.json")
 
     results: list[SegmentResult] = []
     total = len(job.segments)
@@ -112,6 +143,7 @@ def run_job(
                 speed=seg.speed,
                 power=seg.power,
                 mpm_range=seg.mpm_range,
+                **({"mpm_ranges": seg.mpm_ranges} if seg.mpm_ranges else {}),
                 mpm_channel=seg.mpm_channels[0],
                 mpm_channels=seg.mpm_channels,
                 mpm_averaging_time_ms=seg.mpm_averaging_time_ms,
@@ -119,7 +151,9 @@ def run_job(
                 save_csv=None,
             )
             record = session.add(result, is_reference=is_reference)
-            save_record_csv(record, str(job_dir / csv_name), kind)
+            with new_output_file(job_dir / csv_name) as csv_path:
+                save_record_csv(record, str(csv_path), kind)
+            csv_name = csv_path.name
             points = len(record.raw.wavelengths)
             duration = time.monotonic() - started
             log(f"      OK   {points} points -> {csv_name}")
@@ -137,14 +171,14 @@ def run_job(
                 log("stopping: cancellation/connection uncertainty or stop-on-error policy")
                 break
         finally:
-            _write_manifest(job_dir / "manifest.json", job, timestamp, results)
+            _write_manifest(manifest_path, job, timestamp, results)
         if is_reference and i < total:
             reference_ready()
         if seg.wait_after_s:
             log(f"      waiting {seg.wait_after_s:g}s (Ctrl+C to stop)")
             sleep(seg.wait_after_s)
 
-    _write_manifest(job_dir / "manifest.json", job, timestamp, results)
+    _write_manifest(manifest_path, job, timestamp, results)
     return results
 
 
@@ -160,6 +194,7 @@ def _write_manifest(path: Path, job: JobSpec, timestamp: str, results: list[Segm
             "speed_nm_s": seg.speed,
             "power_dbm": seg.power,
             "mpm_range": seg.mpm_range,
+            "mpm_ranges": list(seg.mpm_ranges),
             "channels": list(seg.mpm_channels),
             "wait_after_s": seg.wait_after_s,
             "csv": Path(res.csv_path).name if res.csv_path else None,
@@ -168,7 +203,7 @@ def _write_manifest(path: Path, job: JobSpec, timestamp: str, results: list[Segm
             "error": res.error,
             "duration_s": round(res.duration_s, 3),
             **(record_info(res.record) if res.record else (res.record_info or record_info(None))),
-            "loss_convention": "reference_dbm - measurement_dbm",
+            "loss_convention": "measurement_dbm - reference_dbm",
         })
     manifest = {"job": job.name, "device": job.device, "timestamp": timestamp, "segments": entries}
     with path.open("w", encoding="utf-8") as f:

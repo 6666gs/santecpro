@@ -114,3 +114,63 @@ def test_matching_local_daq_loads_without_gac(monkeypatch, tmp_path):
     assert loader.load_ni_daqmx() is loaded
     assembly.Load.assert_not_called()
     names.GetAssemblyName.assert_called_once_with(str(dll))
+
+
+@pytest.fixture
+def fake_santec_loader(monkeypatch, tmp_path):
+    """Exercise real initialization without CLR, NI drivers or hardware."""
+    import sys
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    for name in ('Santec.Instrument.dll', 'STSProcess.dll'):
+        (tmp_path / name).touch()
+    monkeypatch.setattr(loader.platform, 'system', lambda: 'Windows')
+    monkeypatch.setattr(loader.os, 'pathsep', ';')
+    monkeypatch.setattr(sys, 'path', list(sys.path))
+    clr = SimpleNamespace(AddReference=Mock())
+    monkeypatch.setitem(sys.modules, 'clr', clr)
+    return tmp_path.resolve(), clr
+
+
+def test_repeated_initialization_does_not_grow_search_paths(monkeypatch, fake_santec_loader):
+    import sys
+    directory, _ = fake_santec_loader
+    original = r'C:\Windows\System32;C:\Other tools'
+    monkeypatch.setenv('PATH', original)
+    loader.load_santec_dlls(directory)
+    expected_path, expected_sys_path = loader.os.environ['PATH'], list(sys.path)
+    for _ in range(1000):
+        assert loader.load_santec_dlls(directory) == directory
+    assert loader.os.environ['PATH'] == expected_path == str(directory) + ';' + original
+    assert sys.path == expected_sys_path
+
+
+def test_repairs_existing_vendor_duplicates_only(monkeypatch, fake_santec_loader):
+    directory, _ = fake_santec_loader
+    variant = '"' + str(directory).upper().replace('/', '\\') + '\\"'
+    # Simulate an old server's PATH approaching Windows' 32767-character limit.
+    duplicates = [str(directory), variant] * (30000 // (2 * len(str(directory)) + 5))
+    monkeypatch.setenv('PATH', ';'.join([r'C:\Other', *duplicates, '', r'C:\Other']))
+    loader.load_santec_dlls(directory)
+    assert loader.os.environ['PATH'] == str(directory) + r';C:\Other;;C:\Other'
+
+
+def test_failed_clr_load_can_retry_without_path_growth(monkeypatch, fake_santec_loader):
+    directory, clr = fake_santec_loader
+    monkeypatch.setenv('PATH', r'C:\Windows')
+    clr.AddReference.side_effect = RuntimeError('temporary load failure')
+    with pytest.raises(RuntimeError, match='temporary'):
+        loader.load_santec_dlls(directory)
+    previous = loader.os.environ['PATH']
+    clr.AddReference.side_effect = None
+    assert loader.load_santec_dlls(directory) == directory
+    assert loader.os.environ['PATH'] == previous
+
+
+def test_concurrent_initialization_does_not_duplicate_path(monkeypatch, fake_santec_loader):
+    from concurrent.futures import ThreadPoolExecutor
+    directory, _ = fake_santec_loader
+    monkeypatch.setenv('PATH', r'C:\Windows')
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        assert all(p == directory for p in pool.map(loader.load_santec_dlls, [directory] * 100))
+    assert loader.os.environ['PATH'] == str(directory) + r';C:\Windows'

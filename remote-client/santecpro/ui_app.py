@@ -22,7 +22,7 @@ os.environ.setdefault("XDG_CACHE_HOME", _CACHE_DIR)
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from matplotlib.widgets import SpanSelector
-from PyQt5.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal
+from PyQt5.QtCore import QObject, QThread, QTimer, QSettings, Qt, pyqtSignal
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
@@ -53,6 +53,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from santecpro.exceptions import InstrumentsBusyError
+from santecpro.raw_import import load_raw_reference
 from santecpro.results import ScanResult
 from santecpro.sweep_rules import ALLOWED_STEP_PM, get_allowed_speeds_nm_s
 import config
@@ -121,7 +123,8 @@ class PlotCanvas(FigureCanvas):
         self.axes.set_xlabel("Wavelength (nm)")
         self.axes.set_ylabel("Power (dBm)")
         self.axes.grid(True, alpha=0.3)
-        self.axes.set_title(f"Range {result.mpm_range}, {len(result.powers)} points")
+        range_label = "+".join(map(str, result.scan_params.get("mpm_ranges", []))) or str(result.mpm_range or "unknown")
+        self.axes.set_title(f"Range {range_label}, {len(result.powers)} points")
         self.axes.legend(loc="best")
         self._reset_view()
 
@@ -131,7 +134,7 @@ class PlotCanvas(FigureCanvas):
             self.axes.plot(record.raw.wavelengths, values, linewidth=1.0, label=f"CH{channel} loss")
         self.axes.ticklabel_format(axis="x", style="plain", useOffset=False)
         self.axes.set_xlabel("Wavelength (nm)")
-        self.axes.set_ylabel("Insertion loss (dB), reference − measurement")
+        self.axes.set_ylabel("Insertion loss (dB), measurement − reference")
         self.axes.grid(True, alpha=0.3)
         self.axes.legend(loc="best")
         self._reset_view()
@@ -224,10 +227,20 @@ class AlignmentDialog(QDialog):
         mpm_channels: tuple[int, ...],
         mpm_range: int,
         parent: QWidget | None = None,
-        *, wavelength: float = 1550.0,
+        *, wavelength: float = 1550.0, preferences=None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("对光监视")
+        self._preferences = preferences
+        self._pending_settings = None
+        if preferences is not None:
+            try:
+                saved_wavelength = float(preferences.value("alignment/wavelength_nm", wavelength))
+                saved_power = float(preferences.value("alignment/power_dbm", power))
+                if np.isfinite([saved_wavelength, saved_power]).all() and 1000 <= saved_wavelength <= 2000 and -30 <= saved_power <= 20:
+                    wavelength, power = saved_wavelength, saved_power
+            except (TypeError, ValueError):
+                pass
         self.resize(580, 300)
         self.setModal(True)
         self._thread = None
@@ -236,6 +249,8 @@ class AlignmentDialog(QDialog):
         self._apply_pending = False
         self._last_read_at = None
         self._refresh_ms = 100
+        self._retry_task = None
+        self._busy_count = 0
         self._controller = controller
         self._module = mpm_module
         self._channels = mpm_channels
@@ -293,10 +308,13 @@ class AlignmentDialog(QDialog):
             self.state_label.setText("当前读取结束后应用新参数…")
             return
         self._apply_pending = False
+        self._retry_task = None
+        self._busy_count = 0
         self._last_read_at = None
         self._timer.stop()
         self._monitoring = True
         power, wavelength = self.power_spin.value(), self.wavelength_spin.value()
+        self._pending_settings = (wavelength, power)
         for label in self._labels.values():
             label.setText("设置中…")
         self.state_label.setText(f"正在应用 {wavelength:.4f} nm / {power:.2f} dBm")
@@ -306,7 +324,13 @@ class AlignmentDialog(QDialog):
     def _launch(self, task) -> None:
         self._request_started = time.monotonic()
         self._thread = QThread(self)
-        self._worker = TaskWorker("alignment", task)
+        self._retry_task = task
+        def attempt():
+            try:
+                return task()
+            except InstrumentsBusyError as exc:
+                return exc  # A rejected request is retryable; other errors fail normally.
+        self._worker = TaskWorker("alignment", attempt)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.finished.connect(self._received)
@@ -320,6 +344,23 @@ class AlignmentDialog(QDialog):
         self._thread.start()
 
     def _received(self, result) -> None:
+        if isinstance(result.value, InstrumentsBusyError):
+            if self._monitoring:
+                self._busy_count = min(self._busy_count + 1, 4)
+                self._last_read_at = None
+                self.state_label.setText("服务器暂忙，等待自动重试；当前数值未更新")
+                for label in self._labels.values():
+                    label.setText("等待刷新…")
+            return
+        self._retry_task = None
+        self._busy_count = 0
+        if self._pending_settings is not None:
+            wavelength, power = self._pending_settings
+            if self._preferences is not None:
+                self._preferences.setValue("alignment/wavelength_nm", wavelength)
+                self._preferences.setValue("alignment/power_dbm", power)
+                self._preferences.sync()
+            self._pending_settings = None
         self._set_powers(result.value)
         now = time.monotonic()
         rate = ""
@@ -331,6 +372,7 @@ class AlignmentDialog(QDialog):
             self.state_label.setText("监视中 · 自动量程" + rate + "；修改后点击应用")
 
     def _failed(self, trace: str) -> None:
+        self._pending_settings = None
         self._stop()
         self.state_label.setText("监视失败：" + trace.splitlines()[-1])
         for label in self._labels.values():
@@ -346,18 +388,22 @@ class AlignmentDialog(QDialog):
             self._start()
         elif self._monitoring:
             elapsed_ms = (time.monotonic() - self._request_started) * 1000
-            self._timer.start(max(1, int(self._refresh_ms - elapsed_ms)))
+            delay = min(2000, 250 * 2 ** (self._busy_count - 1)) if self._busy_count else max(1, int(self._refresh_ms - elapsed_ms))
+            self._timer.start(int(delay))
 
     def _stop(self) -> None:
         self._monitoring = False
         self._apply_pending = False
+        self._retry_task = None
+        self._busy_count = 0
         self._timer.stop()
         self.state_label.setText("已停止监视；激光保持当前设置")
 
     def _poll(self) -> None:
         if self._thread is None and self._monitoring:
             self._timer.stop()
-            self._launch(lambda: self._controller.read_alignment_powers(self._module, self._channels))
+            task = self._retry_task or (lambda: self._controller.read_alignment_powers(self._module, self._channels))
+            self._launch(task)
 
     def reject(self) -> None:
         self._stop()
@@ -475,6 +521,13 @@ class ScanMainWindow(ScriptUiMixin, QMainWindow):
         for value, text in [(1, "−30 ~ +10 dBm"), (2, "−40 ~ 0 dBm"), (3, "−50 ~ −10 dBm"),
                             (4, "−60 ~ −20 dBm"), (5, "−80 ~ −30 dBm")]:
             self.range_combo.addItem(f"Range {value} · {text}", value)
+        self.multi_range_check = QCheckBox("多量程拼接（MPM-211）")
+        self.range_checks = [QCheckBox(str(i)) for i in range(1, 6)]
+        for i, check in enumerate(self.range_checks, 1):
+            check.setChecked(i in (2, 3, 4, 5))
+            check.setEnabled(False)
+            self.multi_range_check.toggled.connect(check.setEnabled)
+        self.multi_range_check.toggled.connect(lambda enabled: self.range_combo.setEnabled(not enabled))
         self.module_spin = self._int_spin(0, 4, 0)
         self.sweep_mode_combo = QComboBox()
         self.sweep_mode_combo.addItem("1 - Continuous One-way")
@@ -497,10 +550,23 @@ class ScanMainWindow(ScriptUiMixin, QMainWindow):
         self.save_check.setChecked(True)
         self.save_path_edit = QLineEdit(str(Path.cwd() / "scan_result_raw.csv"))
         self.save_path_edit.setMinimumWidth(0)
+        self.save_name_edit = QLineEdit(Path(self.save_path_edit.text()).name)
+        self.save_name_edit.setPlaceholderText("保存文件名")
+        self.save_name_edit.setAccessibleName("保存文件名")
+        self.save_name_edit.setMinimumWidth(100)
+        self.save_name_edit.setMaximumWidth(300)
+        self.save_name_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.save_name_edit.textChanged.connect(self._update_save_filename)
+        self.save_path_edit.textChanged.connect(self._sync_save_filename)
+        self.save_browse_btn = QPushButton("…")
+        self.save_browse_btn.setFixedWidth(30)
+        self.save_browse_btn.setToolTip("选择保存目录和文件名")
+        self.save_browse_btn.clicked.connect(self._choose_csv_path)
+        self._sync_save_filename(self.save_path_edit.text())
         self.export_combo = QComboBox()
         self.export_combo.addItem("保存 Raw", "raw")
         self.export_combo.addItem("保存 Loss", "loss")
-        self.export_combo.setToolTip("Loss = reference − measurement（正值插损）；只选择导出内容，不删除内存数据")
+        self.export_combo.setToolTip("Loss = measurement − reference（有损器件通常为负值）；只选择导出内容，不删除内存数据")
         self.view_combo = QComboBox()
         self.view_combo.addItem("显示 Raw", "raw")
         self.view_combo.addItem("显示 Loss", "loss")
@@ -526,6 +592,7 @@ class ScanMainWindow(ScriptUiMixin, QMainWindow):
         self.save_btn = QPushButton("保存所选扫描")
         self.save_btn.clicked.connect(self._save_last_result)
         self.reference_menu = QMenu(self)
+        self.import_reference_btn = self._action(self.reference_menu, "读取 Raw 文件并设为 Reference…", self._import_reference)
         self.set_reference_btn = self._action(self.reference_menu, "将所选扫描设为 Reference", self._set_reference)
         self.view_reference_btn = self._action(self.reference_menu, "查看 Reference", self._view_reference)
         self.save_reference_btn = self._action(self.reference_menu, "保存 Reference Raw…", self._save_reference)
@@ -537,7 +604,8 @@ class ScanMainWindow(ScriptUiMixin, QMainWindow):
         self.laser_on_btn = self._action(self.instrument_menu, "开启激光 / 等待预热", self._start_laser)
         self.laser_off_btn = self._action(self.instrument_menu, "手动关闭激光", lambda: self._run_task("laser_off", self._controller.laser_off))
         self.instrument_menu.addSeparator()
-        self.alignment_btn = self._action(self.instrument_menu, "对光监视…", self._open_alignment_dialog)
+        self.alignment_btn = QPushButton("对光监视")
+        self.alignment_btn.clicked.connect(self._open_alignment_dialog)
         self.status_label = QLabel("未连接")
         self.status_label.setWordWrap(True)
         self.status_label.setMinimumHeight(32)
@@ -571,7 +639,7 @@ class ScanMainWindow(ScriptUiMixin, QMainWindow):
         self.fullscreen_button = QPushButton("进入全屏")
         self.fullscreen_button.setToolTip("Mac：Control + Command + F；Esc 退出全屏")
         self.fullscreen_button.clicked.connect(self._toggle_fullscreen)
-        for widget in (self.instrument_button, self.settings_button, self.script_button, self.script_pause_btn, self.log_button, self.fullscreen_button):
+        for widget in (self.alignment_btn, self.instrument_button, self.settings_button, self.script_button, self.script_pause_btn, self.log_button, self.fullscreen_button):
             row.addWidget(widget)
         return panel
 
@@ -626,6 +694,8 @@ class ScanMainWindow(ScriptUiMixin, QMainWindow):
             widget.setMinimumHeight(32)
             row.addWidget(widget)
         row.addStretch()
+        row.addWidget(self.save_name_edit, 1)
+        row.addWidget(self.save_browse_btn)
         row.addWidget(self.save_check)
         row.addWidget(self.export_combo)
         row.addWidget(self.save_btn)
@@ -651,7 +721,15 @@ class ScanMainWindow(ScriptUiMixin, QMainWindow):
         self.settings_tabs.addTab(connection, "连接")
         acquisition = QWidget()
         form = QFormLayout(acquisition)
-        form.addRow("功率计量程", self.range_combo)
+        form.addRow("单量程", self.range_combo)
+        form.addRow(self.multi_range_check)
+        ranges_row = QHBoxLayout()
+        for check in self.range_checks:
+            ranges_row.addWidget(check)
+        form.addRow("拼接 Range", ranges_row)
+        hint = QLabel("依次扫描所选量程并拼接；扫描期间保持光路不变。仅用于 MPM-211。")
+        hint.setWordWrap(True)
+        form.addRow(hint)
         form.addRow("模块编号（从 0 开始）", self.module_spin)
         form.addRow("扫描模式", self.sweep_mode_combo)
         note = QLabel("起止波长决定扫描方向。更改模块或通道后，请确认 reference 对应相同光路。")
@@ -728,11 +806,19 @@ class ScanMainWindow(ScriptUiMixin, QMainWindow):
         self._set_busy(False)
 
     def _run_scan(self) -> None:
-        settings = self._scan_settings()
+        try:
+            settings = self._scan_settings()
+        except ValueError as exc:
+            QMessageBox.warning(self, "扫描设置", str(exc))
+            return
         self._run_task("scan", lambda: self._controller.run_single_scan(settings))
 
     def _run_reference_scan(self) -> None:
-        settings = self._scan_settings()
+        try:
+            settings = self._scan_settings()
+        except ValueError as exc:
+            QMessageBox.warning(self, "扫描设置", str(exc))
+            return
         self._run_task("reference_scan", lambda: self._controller.run_single_scan(settings))
 
     def _open_alignment_dialog(self) -> None:
@@ -745,6 +831,7 @@ class ScanMainWindow(ScriptUiMixin, QMainWindow):
             int(self.range_combo.currentData()),
             self,
             wavelength=self.start_spin.value(),
+            preferences=QSettings("SantecPro", "SantecPro"),
         )
         dialog.show()
 
@@ -755,6 +842,10 @@ class ScanMainWindow(ScriptUiMixin, QMainWindow):
         self._save_result(self._last_record)
 
     def _save_result(self, record: ScanRecord) -> None:
+        name = self.save_name_edit.text().strip()
+        if not name or name in (".", "..") or any(c in name for c in '/\\'):
+            QMessageBox.warning(self, "文件名无效", "请输入文件名；保存目录请通过旁边的 … 按钮选择。")
+            return
         kind = "raw" if record.is_reference else self.export_combo.currentData()
         self._export_record(record, self.save_path_edit.text().strip() or "scan_result.csv", kind)
 
@@ -778,6 +869,13 @@ class ScanMainWindow(ScriptUiMixin, QMainWindow):
         record.saved = True
         self._trim_history()
         self._log(f"Saved {kind}: {target}")
+
+    def _import_reference(self) -> None:
+        if self._thread is not None or self._script_job is not None:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "读取 Raw Reference", "", "CSV Files (*.csv)")
+        if path:
+            self._run_task("import_reference", lambda: load_raw_reference(path))
 
     def _save_reference(self) -> None:
         if self._session.reference_index is None:
@@ -848,7 +946,7 @@ class ScanMainWindow(ScriptUiMixin, QMainWindow):
         self.status_label.setText(f"扫描 #{record.sequence}：{len(record.raw.wavelengths)} 点；{state}")
 
     def _run_task(self, label: str, task: Callable[[], object | None]) -> None:
-        if self._preview:
+        if self._preview and label != "import_reference":
             self.status_label.setText("界面预览模式：不连接或操作真实仪器")
             return
         if self._thread is not None:
@@ -925,18 +1023,24 @@ class ScanMainWindow(ScriptUiMixin, QMainWindow):
             self.status_label.setText(f"Windows 服务已启动: {result.value}")
         elif result.label == "script_scan" and isinstance(result.value, ScanResult):
             self._script_result(result.value)
-        elif result.label in ("scan", "reference_scan") and isinstance(result.value, ScanResult):
+        elif result.label in ("scan", "reference_scan", "import_reference") and isinstance(result.value, ScanResult):
             raw = result.value
             raw.scan_params.setdefault("tsl_idn", self._controller._tsl_idn)
             raw.scan_params.setdefault("mpm_idn", self._controller._mpm_idn)
-            record = self._session.add(raw, is_reference=result.label == "reference_scan")
+            imported = result.label == "import_reference"
+            record = self._session.add(raw, is_reference=result.label != "scan")
+            record.saved = imported
             index = len(self._session.records) - 1
             self.history_combo.addItem(f"#{record.sequence} {'Reference' if record.is_reference else '测量'} {raw.timestamp}")
             self.history_combo.setCurrentIndex(index)
             self._select_history(index)
             if record.loss_error and not record.is_reference:
                 self._log(record.loss_error)
-            if self.save_check.isChecked():
+            if imported:
+                source = raw.scan_params["reference_source"]
+                self.history_combo.setItemText(index, f"#{record.sequence} Reference · {Path(source).name}")
+                self._log(f"Reference imported: {source}")
+            if self.save_check.isChecked() and not imported:
                 self._save_result(record)
             self._trim_history()
 
@@ -976,7 +1080,16 @@ class ScanMainWindow(ScriptUiMixin, QMainWindow):
             mpm_channel=channels[0],
             mpm_averaging_time_ms=0.01,
             mpm_channels=channels,
+            mpm_ranges=self._selected_ranges(),
         )
+
+    def _selected_ranges(self) -> tuple[int, ...]:
+        if not self.multi_range_check.isChecked():
+            return ()
+        ranges = tuple(i for i, check in enumerate(self.range_checks, 1) if check.isChecked())
+        if len(ranges) < 2:
+            raise ValueError("多量程拼接请至少选择两个 Range")
+        return ranges
 
     def _selected_channels(self) -> tuple[int, ...]:
         channels = tuple(
@@ -1009,6 +1122,24 @@ class ScanMainWindow(ScriptUiMixin, QMainWindow):
             QMessageBox.warning(self, "无 reference", "当前没有扫描设置的 reference。")
             return
         self.plot_canvas.plot_reference(self._session.reference)
+
+    def _sync_save_filename(self, path: str) -> None:
+        self.save_name_edit.blockSignals(True)
+        self.save_name_edit.setText(Path(path).name)
+        self.save_name_edit.blockSignals(False)
+        self.save_name_edit.setToolTip(f"保存文件名（自动添加 Raw/Loss 后缀，同名自动编号）\n完整路径：{path}")
+
+    def _update_save_filename(self, name: str) -> None:
+        name = name.strip()
+        if not name or name in (".", "..") or any(c in name for c in '/\\'):
+            return
+        if not name.lower().endswith(".csv"):
+            name += ".csv"
+        target = Path(self.save_path_edit.text()).parent / name
+        self.save_path_edit.blockSignals(True)
+        self.save_path_edit.setText(str(target))
+        self.save_path_edit.blockSignals(False)
+        self.save_name_edit.setToolTip(f"完整路径：{target}\n自动添加 Raw/Loss 后缀，同名自动编号")
 
     def _choose_csv_path(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -1047,6 +1178,7 @@ class ScanMainWindow(ScriptUiMixin, QMainWindow):
             self.scan_btn,
             self.save_btn,
             self.set_reference_btn,
+            self.import_reference_btn,
             self.clear_reference_btn,
             self.view_reference_btn,
             self.reference_scan_btn,
@@ -1068,6 +1200,8 @@ class ScanMainWindow(ScriptUiMixin, QMainWindow):
             control.setEnabled(not script_active)
         self.settings_button.setEnabled(not script_active)
         self.export_combo.setEnabled(not script_active)
+        self.save_name_edit.setEnabled(not script_active)
+        self.save_browse_btn.setEnabled(not script_active)
         self.cancel_btn.setText("停止脚本" if script_active else "取消扫描")
         self.cancel_btn.setEnabled(busy and self._task_label in ("scan", "reference_scan", "script_scan") and self._cancel_thread is None)
 
