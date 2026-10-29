@@ -16,6 +16,7 @@ build/
 # Generated scan output / test data
 scan_results/
 test_11_points.csv
+*.csv
 windows-server/scan_jobs/
 
 # Runtime logs

@@ -1,7 +1,7 @@
 # 修改器件名和保存目录即可；路径包含空格时用双引号。
 job two_pass
 device "device_001"
-output "/Users/x/Library/CloudStorage/OneDrive-Personal/Project/PIC/tapeouts/2605_FPcoupleECL/2605EBL/2609gcscan/data/260916"
+output "./scan_results/device_001"
 
 # 功率 dBm；MPM 量程编号；通道
 set power=0 range=1 channels=1
