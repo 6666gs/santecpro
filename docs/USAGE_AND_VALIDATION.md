@@ -16,7 +16,7 @@
 
 ## 部署
 
-Windows：完整更新 `windows-server/`（包括 `santec_dll_backend/`、`santecpro/` 和 vendor DLL）。使用 Python 3.10+、匹配位数的仪器驱动和运行环境。先确认 GPIB 与触发连线。
+Windows：完整更新 `windows-server/`（包括 `santec_dll_backend/`、`santecpro/`；vendor DLL 不在仓库中，需按 `windows-server/vendor/README.md` 自行放入）。使用 Python 3.10+、匹配位数的仪器驱动和运行环境。先确认 GPIB 与触发连线。
 
 ```bat
 cd windows-server

@@ -17,6 +17,11 @@ build/
 scan_results/
 test_11_points.csv
 *.csv
+
+# Proprietary vendor binaries (Santec / NI / Keysight / FTDI) - obtain separately,
+# see windows-server/vendor/README.md. PROVENANCE.json stays tracked.
+windows-server/vendor/santec_dll/*
+!windows-server/vendor/santec_dll/PROVENANCE.json
 windows-server/scan_jobs/
 
 # Runtime logs

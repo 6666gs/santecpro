@@ -2,7 +2,7 @@
 """Preflight environment check for the Windows Santec server.
 
 Run this on the Windows measurement PC before ``python server.py``. It verifies
-Python, dependencies, bundled DLLs, .NET/pythonnet DLL loading, and VISA/GPIB,
+Python, dependencies, vendor DLLs, .NET/pythonnet DLL loading, and VISA/GPIB,
 then prints a clear go / no-go so problems surface here instead of mid-scan.
 
 Usage::
@@ -100,10 +100,10 @@ def check_dlls() -> None:
     header(f"Vendor DLLs  ({config.DLL_DIR})")
     dll_dir = Path(config.DLL_DIR)
     if not dll_dir.is_dir():
-        line(FAIL, f"DLL directory missing: {dll_dir}")
+        line(FAIL, f"DLL directory missing: {dll_dir} (see vendor/README.md for how to obtain the DLLs)")
         return
     for name in REQUIRED_DLLS:
-        line(OK, name) if (dll_dir / name).exists() else line(FAIL, f"{name} MISSING (required)")
+        line(OK, name) if (dll_dir / name).exists() else line(FAIL, f"{name} MISSING (required; see vendor/README.md)")
     for name in SUPPORT_DLLS:
         line(OK, name) if (dll_dir / name).exists() else line(WARN, f"{name} missing (may be needed for GPIB)")
 

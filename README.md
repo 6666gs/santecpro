@@ -19,7 +19,7 @@ Santec **TSL-550** 可调激光器 + **MPM-210** 功率计的扫谱系统。底�
 
 启动界面后会自动检查激光并等待预热；扫描过程中不自动开关激光。部署、取消扫描与验收步骤见 [当前使用说明](docs/USAGE_AND_VALIDATION.md)。
 
-**Windows 端**(DLL 已随仓库提供,无需手动获取)
+**Windows 端**(需先自行获取 Santec/NI/Keysight DLL,见 [windows-server/vendor/README.md](windows-server/vendor/README.md))
 ```bat
 cd windows-server
 python check_setup.py --install   :: 装依赖 + 自检 Python/DLL/VISA/GPIB,打印 ✅/❌

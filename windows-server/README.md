@@ -30,11 +30,11 @@ pip install -r requirements.txt
 
 > **一步到位 + 自检(推荐)**:`python check_setup.py --install` 会先装依赖,再逐项检查 Python 版本、依赖、DLL、pythonnet 加载、VISA/GPIB,并打印 `✅ 就绪 / ❌ 缺什么`。只想检查不安装就去掉 `--install`。
 
-## 3. DLL(已随仓库提供,无需手动放入)
+## 3. DLL(需自行获取)
 
-所需的 Santec/NI/Keysight DLL 已包含在 `vendor/santec_dll/`(即 `loader.py` 默认读取路径),**无需再手动获取**。详见 [vendor/README.md](vendor/README.md)。
+所需的 Santec/NI/Keysight DLL 是各厂商的专有二进制,**不随仓库提供**。请自行获取并放入 `vendor/santec_dll/`(即 `loader.py` 默认读取路径),具体文件清单、下载来源、版本要求和校验方法见 [vendor/README.md](vendor/README.md)。放好后运行 `python check_setup.py` 自检。
 
-> ⚠️ 这些是专有二进制,仅因本仓库为 **私有** 才随附;请勿将仓库改为公开或外传 DLL。
+> ⚠️ 这些 DLL 不在本项目的 MIT 许可范围内,请遵守各厂商的许可协议,不要提交到仓库。
 
 ## 4. 配置
 
@@ -91,7 +91,7 @@ windows-server/
 ├── santec_dll_backend/     pythonnet 加载 DLL、执行扫描(核心)
 ├── santecpro/              SCPI 备用驱动子集(instruments/·scanner 等)
 ├── diagnostics/            诊断脚本(可单独运行,不经 Flask)
-├── vendor/santec_dll/      DLL(已随仓库提供)
+├── vendor/santec_dll/      DLL(需自行获取,见 vendor/README.md)
 ├── tests/                  pytest(仪器使用模拟对象)
 └── requirements.txt
 ```
